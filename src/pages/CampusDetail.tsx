@@ -93,7 +93,7 @@ export const CampusDetail: React.FC = () => {
       setSaving(true);
       await campusService.deleteBuilding(deleteConfirm.id);
       setDeleteConfirm(null);
-      loadData();
+      if (campusId) loadData(campusId);
     } finally {
       setSaving(false);
     }
@@ -113,7 +113,7 @@ export const CampusDetail: React.FC = () => {
       if (res.success && res.data) {
         setDuplicateConfirm(null);
         setDuplicateName('');
-        loadData();
+        if (campusId) loadData(campusId);
       }
     } finally {
       setSaving(false);

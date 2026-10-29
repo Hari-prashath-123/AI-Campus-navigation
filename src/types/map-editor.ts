@@ -21,12 +21,15 @@ export interface EditorViewport {
   rotation: number;
 }
 
+export type EditorMode = 'draw' | 'select' | 'navigate' | 'connect';
+
 export interface LayerVisibility {
   floorplanImage: boolean;
   nodes: boolean;
   edges: boolean;
   objects: boolean;
   grid: boolean;
+  validationWarnings?: boolean;
 }
 
 export interface EditorShape {

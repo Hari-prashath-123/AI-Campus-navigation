@@ -252,11 +252,161 @@ export class RoutingEngine {
       transitions
     };
   }
+
+  public findRouteBetweenNodes(startNode: string, endNode: string, prefs: RoutePreferences): RouteResult {
+    if (!this.nodes.has(startNode) || !this.nodes.has(endNode)) {
+      return { success: false, nodes: [], objects: [], totalDistanceMeters: 0, estimatedTimeSeconds: 0, floors: [], buildings: [], transitions: [], message: 'Start or end node not found in graph.' };
+    }
+
+    const frontier = new PriorityQueue<string>();
+    frontier.enqueue(startNode, 0);
+
+    const cameFrom = new Map<string, { node: string; edge: CampusConnection } | null>();
+    const costSoFar = new Map<string, number>();
+
+    cameFrom.set(startNode, null);
+    costSoFar.set(startNode, 0);
+
+    let found = false;
+
+    while (!frontier.isEmpty()) {
+      const current = frontier.dequeue()!;
+
+      if (current === endNode) {
+        found = true;
+        break;
+      }
+
+      const neighbors = this.edges.get(current) || [];
+      for (const edge of neighbors) {
+        if (prefs.blockedConnectionIds?.includes(edge.id)) continue;
+        if (prefs.accessibleOnly && !edge.isAccessible) continue;
+        if (prefs.mode === 'vehicle' && !edge.isVehicleAccessible) continue;
+        if (prefs.mode === 'walking' && !edge.isWalkable) continue;
+
+        const newCost = costSoFar.get(current)! + (edge.distanceMeters * edge.weightMultiplier);
+        const nextNode = edge.targetNodeId;
+
+        if (!costSoFar.has(nextNode) || newCost < costSoFar.get(nextNode)!) {
+          costSoFar.set(nextNode, newCost);
+          const priority = newCost + this.heuristic(nextNode, endNode);
+          frontier.enqueue(nextNode, priority);
+          cameFrom.set(nextNode, { node: current, edge });
+        }
+      }
+    }
+
+    if (!found) {
+      return { success: false, nodes: [], objects: [], totalDistanceMeters: 0, estimatedTimeSeconds: 0, floors: [], buildings: [], transitions: [], message: 'No valid route found between nodes.' };
+    }
+
+    const pathNodes: string[] = [];
+    const pathEdges: CampusConnection[] = [];
+    let curr: string | null = endNode;
+
+    while (curr !== null) {
+      pathNodes.push(curr);
+      const prev = cameFrom.get(curr);
+      if (prev && prev.node !== null) {
+        pathEdges.push(prev.edge);
+        curr = prev.node;
+      } else {
+        curr = null;
+      }
+    }
+
+    pathNodes.reverse();
+    pathEdges.reverse();
+
+    let totalDist = 0;
+    const floorsSet = new Set<string>();
+    const buildingsSet = new Set<string>();
+    const transitions: RouteTransition[] = [];
+
+    const sourceNode = this.nodes.get(startNode);
+    if (sourceNode?.floorId) floorsSet.add(sourceNode.floorId);
+    if (sourceNode?.buildingId) buildingsSet.add(sourceNode.buildingId);
+
+    for (const edge of pathEdges) {
+      totalDist += edge.distanceMeters;
+      if (edge.targetFloorId) floorsSet.add(edge.targetFloorId);
+      if (edge.targetBuildingId) buildingsSet.add(edge.targetBuildingId);
+
+      if (edge.connectionType !== 'corridor' && edge.connectionType !== 'door') {
+        let desc = `Use ${edge.connectionType}`;
+        if (edge.connectionType === 'staircase') desc = `Take the stairs`;
+        if (edge.connectionType === 'elevator') desc = `Take the elevator`;
+        if (edge.connectionType === 'bridge') desc = `Cross the bridge`;
+        if (edge.targetFloorId && edge.sourceFloorId !== edge.targetFloorId) {
+          desc += ` to another floor`;
+        } else if (edge.targetBuildingId && edge.sourceBuildingId !== edge.targetBuildingId) {
+          desc += ` to another building`;
+        }
+
+        transitions.push({
+          fromNodeId: edge.sourceNodeId,
+          toNodeId: edge.targetNodeId,
+          type: edge.connectionType,
+          description: desc,
+        });
+      }
+    }
+
+    const speed = prefs.mode === 'vehicle' ? 5 : 1.4;
+    const estimatedTimeSeconds = totalDist / speed;
+
+    return {
+      success: true,
+      nodes: pathNodes,
+      objects: [],
+      totalDistanceMeters: totalDist,
+      estimatedTimeSeconds,
+      floors: Array.from(floorsSet),
+      buildings: Array.from(buildingsSet),
+      transitions,
+    };
+  }
 }
 
-// Stub for ai.service.ts compatibility
+// Authoritative routing service bridging navStore and objectStore
 export const routingService = {
-  calculateRoute: async (_campusId: string, _source: string, _target: string, _options?: { accessibleOnly?: boolean; mode?: 'walking' | 'vehicle'; blockedConnectionIds?: string[] }): Promise<{ success: boolean; data: any }> => {
-    return { success: true, data: { nodes: [], message: 'Mock route' } };
+  calculateRoute: async (
+    campusId: string,
+    source: string,
+    target: string,
+    options?: { accessibleOnly?: boolean; mode?: 'walking' | 'vehicle'; blockedConnectionIds?: string[] }
+  ): Promise<{ success: boolean; data: RouteResult }> => {
+    // Dynamic import to avoid circular dependency issues at import time
+    const { navStore } = await import('./nav.store');
+    const { objectStore } = await import('./object.store');
+
+    const nodes = navStore.getNodesByCampus(campusId);
+    const connections = navStore.getConnectionsByCampus(campusId);
+    const objects = objectStore.getByCampus(campusId);
+
+    const engine = new RoutingEngine(nodes, connections, objects);
+    const prefs: RoutePreferences = {
+      mode: options?.mode || 'walking',
+      accessibleOnly: options?.accessibleOnly ?? false,
+      blockedConnectionIds: options?.blockedConnectionIds,
+    };
+
+    const sourceObj = objects.find(o => o.id === source);
+    const targetObj = objects.find(o => o.id === target);
+
+    let result: RouteResult;
+    if (sourceObj && targetObj) {
+      result = engine.findRoute(source, target, prefs);
+    } else {
+      // Direct node IDs or mix of node and object
+      const startNodeId = sourceObj ? sourceObj.associatedNodeId : source;
+      const endNodeId = targetObj ? targetObj.associatedNodeId : target;
+      result = engine.findRouteBetweenNodes(startNodeId, endNodeId, prefs);
+      if (sourceObj || targetObj) {
+        result.objects = [sourceObj?.id || '', targetObj?.id || ''].filter(Boolean);
+      }
+    }
+
+    return { success: result.success, data: result };
   }
 };

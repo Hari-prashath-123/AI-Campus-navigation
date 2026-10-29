@@ -1,28 +1,35 @@
 import { CampusConnection } from '../types/connection';
-import { v4 as uuidv4 } from 'uuid';
+import { navStore } from './nav.store';
 
-let connections: CampusConnection[] = [];
-
+/**
+ * connectionService — unified adapter over the persistent navStore.
+ */
 export const connectionService = {
   getConnectionsByCampus: async (campusId: string): Promise<{ success: boolean; data: CampusConnection[] }> => {
-    return new Promise(resolve => setTimeout(() => {
-      resolve({ success: true, data: connections.filter(c => c.campusId === campusId) });
-    }, 200));
+    return new Promise(resolve => {
+      const data = navStore.getConnectionsByCampus(campusId);
+      resolve({ success: true, data });
+    });
+  },
+
+  getConnectionsByFloor: async (floorId: string): Promise<{ success: boolean; data: CampusConnection[] }> => {
+    return new Promise(resolve => {
+      const data = navStore.getConnectionsByFloor(floorId);
+      resolve({ success: true, data });
+    });
   },
 
   createConnection: async (data: Partial<CampusConnection>): Promise<{ success: boolean; data?: CampusConnection; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
+    return new Promise(resolve => {
       if (!data.campusId || !data.sourceNodeId || !data.targetNodeId || !data.connectionType) {
         return resolve({ success: false, message: 'Missing required connection fields.' });
       }
 
-      // Basic validation
       if (data.sourceNodeId === data.targetNodeId) {
         return resolve({ success: false, message: 'Source and target cannot be the same.' });
       }
 
-      const newConn: CampusConnection = {
-        id: uuidv4(),
+      const res = navStore.createConnection({
         campusId: data.campusId,
         sourceNodeId: data.sourceNodeId,
         sourceBuildingId: data.sourceBuildingId,
@@ -40,33 +47,30 @@ export const connectionService = {
         distanceMeters: data.distanceMeters || 10,
         weightMultiplier: data.weightMultiplier || 1.0,
         availability: data.availability,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      
-      connections.push(newConn);
-      resolve({ success: true, data: newConn });
-    }, 300));
+      });
+
+      if ('error' in res) {
+        return resolve({ success: false, message: res.error });
+      }
+
+      resolve({ success: true, data: res });
+    });
   },
 
   updateConnection: async (id: string, data: Partial<CampusConnection>): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const idx = connections.findIndex(c => c.id === id);
-      if (idx === -1) return resolve({ success: false, message: 'Connection not found.' });
-
-      if (data.sourceNodeId && data.targetNodeId && data.sourceNodeId === data.targetNodeId) {
-         return resolve({ success: false, message: 'Source and target cannot be the same.' });
+    return new Promise(resolve => {
+      const updated = navStore.updateConnection(id, data);
+      if (!updated) {
+        return resolve({ success: false, message: 'Connection not found or invalid.' });
       }
-
-      connections[idx] = { ...connections[idx], ...data, updatedAt: new Date().toISOString() };
       resolve({ success: true });
-    }, 300));
+    });
   },
 
   deleteConnection: async (id: string): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      connections = connections.filter(c => c.id !== id);
-      resolve({ success: true });
-    }, 300));
+    return new Promise(resolve => {
+      const deleted = navStore.deleteConnection(id);
+      resolve({ success: deleted, message: deleted ? undefined : 'Connection not found' });
+    });
   }
 };

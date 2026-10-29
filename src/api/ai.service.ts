@@ -110,7 +110,7 @@ export class AIService {
         timestamp: new Date().toISOString(),
         detectedLanguage: lang,
         toolCalls,
-        routeResult: routeRes.result,
+        routeResult: routeRes.result as any,
       },
     };
   }

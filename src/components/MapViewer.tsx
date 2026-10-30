@@ -1,168 +1,596 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { MapObject, SpatialNode } from '../types';
+import { CampusConnection } from '../types/connection';
+import { RouteResult } from '../api/routing.service';
+import { Plus, Minus, RotateCcw, Navigation, MapPin, X, Check } from 'lucide-react';
 
 interface MapViewerProps {
   objects: MapObject[];
   nodes: SpatialNode[];
-  routeResult?: any | null;
+  connections?: CampusConnection[];
+  routeResult?: RouteResult | null;
   currentFloorId?: string;
+  sourceObj?: MapObject | null;
+  destObj?: MapObject | null;
   width?: number;
   height?: number;
   onObjectClick?: (obj: MapObject) => void;
+  onSelectAsSource?: (obj: MapObject) => void;
+  onSelectAsDestination?: (obj: MapObject) => void;
 }
 
 export const MapViewer: React.FC<MapViewerProps> = ({ 
   objects, 
   nodes, 
+  connections = [],
   routeResult, 
-  currentFloorId, 
-  width = 800, 
-  height = 600,
-  onObjectClick
+  currentFloorId,
+  sourceObj,
+  destObj,
+  width: initialWidth = 900, 
+  height: initialHeight = 650,
+  onObjectClick,
+  onSelectAsSource,
+  onSelectAsDestination
 }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  const [dimensions, setDimensions] = useState({ width: initialWidth, height: initialHeight });
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [selectedObj, setSelectedObj] = useState<MapObject | null>(null);
+
+  // Resize canvas when container size changes
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          setDimensions({
+            width: Math.floor(rect.width),
+            height: Math.floor(rect.height),
+          });
+        }
+      }
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    if (containerRef.current) observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const resetView = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  const handleZoom = (factor: number) => {
+    setZoom(prev => Math.min(Math.max(0.5, prev * factor), 4));
+  };
+
+  // Convert map coordinates (0-100 percentage space) to screen coordinates
+  const toScreenCoords = useCallback((coord: { x: number; y: number }) => {
+    const baseW = dimensions.width;
+    const baseH = dimensions.height;
+    const cx = (coord.x / 100) * baseW;
+    const cy = (coord.y / 100) * baseH;
+    return {
+      x: (cx - baseW / 2) * zoom + baseW / 2 + pan.x,
+      y: (cy - baseH / 2) * zoom + baseH / 2 + pan.y,
+    };
+  }, [dimensions, zoom, pan]);
+
+  // Render loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Clear canvas
+    const { width, height } = dimensions;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    ctx.scale(dpr, dpr);
+
+    // Clear background
     ctx.clearRect(0, 0, width, height);
 
-    // Draw background (Grid)
+    // Floor area background
     ctx.fillStyle = '#f8fafc';
     ctx.fillRect(0, 0, width, height);
+
+    // Grid lines
+    ctx.save();
     ctx.strokeStyle = '#e2e8f0';
     ctx.lineWidth = 1;
-    for (let x = 0; x <= width; x += 50) {
+    const gridSize = 40 * zoom;
+    const offsetX = (pan.x % gridSize);
+    const offsetY = (pan.y % gridSize);
+
+    for (let x = offsetX; x <= width; x += gridSize) {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
     }
-    for (let y = 0; y <= height; y += 50) {
+    for (let y = offsetY; y <= height; y += gridSize) {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
     }
+    ctx.restore();
 
-    // Filter objects & nodes for the current floor
     const floorObjects = objects.filter(o => o.floorId === currentFloorId);
     const floorNodes = nodes.filter(n => n.floorId === currentFloorId);
+    const floorNodeMap = new Map(floorNodes.map(n => [n.id, n]));
 
-    // Draw objects
-    floorObjects.forEach(obj => {
-      // Scale coordinates (assuming they are percentages for now, or raw if we adapt it. Let's assume % for 800x600 for a moment, or direct pixel mapping if it's 0-100)
-      // If coordinates are 0-100 (percentage), then scale by width/height.
-      const px = (obj.coordinates.x / 100) * width;
-      const py = (obj.coordinates.y / 100) * height;
+    // 1. Draw floor corridors / connections
+    const floorConns = connections.filter(
+      c => c.sourceFloorId === currentFloorId && c.targetFloorId === currentFloorId
+    );
 
-      ctx.fillStyle = obj.category === 'accessible_restroom' ? '#dbeafe' : 
-                      obj.category === 'lab' ? '#fef3c7' : 
-                      obj.category === 'landmark' ? '#fce7f3' : '#e0e7ff';
-      ctx.strokeStyle = '#6366f1';
-      ctx.lineWidth = 2;
+    ctx.save();
+    floorConns.forEach(conn => {
+      const srcNode = floorNodeMap.get(conn.sourceNodeId);
+      const tgtNode = floorNodeMap.get(conn.targetNodeId);
+      if (!srcNode || !tgtNode) return;
 
+      const p1 = toScreenCoords(srcNode.coordinates);
+      const p2 = toScreenCoords(tgtNode.coordinates);
+
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.lineWidth = Math.max(6 * zoom, 3);
+      ctx.lineCap = 'round';
       ctx.beginPath();
-      // Draw as simple rectangle/circle
-      ctx.arc(px, py, 15, 0, 2 * Math.PI);
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = Math.max(2 * zoom, 1);
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+    });
+    ctx.restore();
+
+    // 2. Draw Walkway Nodes (subtle hallway junctions)
+    floorNodes.forEach(node => {
+      if (node.type === 'hallway' || node.type === 'outdoor_waypoint') {
+        const pt = toScreenCoords(node.coordinates);
+        ctx.fillStyle = '#94a3b8';
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, Math.max(3 * zoom, 2), 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    });
+
+    // 3. Draw Active Route on current floor
+    if (routeResult && routeResult.nodes && routeResult.nodes.length > 0) {
+      const allNodeMap = new Map(nodes.map(n => [n.id, n]));
+      const fullPathNodes = routeResult.nodes
+        .map(id => allNodeMap.get(id))
+        .filter(Boolean) as SpatialNode[];
+
+      // Group path nodes into continuous segments on this floor
+      const segments: SpatialNode[][] = [];
+      let curSegment: SpatialNode[] = [];
+
+      for (let i = 0; i < fullPathNodes.length; i++) {
+        const node = fullPathNodes[i];
+        if (node.floorId === currentFloorId) {
+          curSegment.push(node);
+        } else {
+          if (curSegment.length > 0) {
+            segments.push(curSegment);
+            curSegment = [];
+          }
+        }
+      }
+      if (curSegment.length > 0) segments.push(curSegment);
+
+      // Render route segments with glowing effect
+      segments.forEach(segment => {
+        if (segment.length < 1) return;
+
+        // Outer glow
+        ctx.save();
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.25)';
+        ctx.lineWidth = Math.max(14 * zoom, 8);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        segment.forEach((n, idx) => {
+          const pt = toScreenCoords(n.coordinates);
+          if (idx === 0) ctx.moveTo(pt.x, pt.y);
+          else ctx.lineTo(pt.x, pt.y);
+        });
+        ctx.stroke();
+        ctx.restore();
+
+        // Main polyline
+        ctx.save();
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = Math.max(5 * zoom, 3);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        segment.forEach((n, idx) => {
+          const pt = toScreenCoords(n.coordinates);
+          if (idx === 0) ctx.moveTo(pt.x, pt.y);
+          else ctx.lineTo(pt.x, pt.y);
+        });
+        ctx.stroke();
+
+        // Animated dashed overlay
+        ctx.strokeStyle = '#93c5fd';
+        ctx.lineWidth = Math.max(2 * zoom, 1.5);
+        ctx.setLineDash([8 * zoom, 6 * zoom]);
+        ctx.stroke();
+        ctx.restore();
+
+        // Draw route waypoint dots along path
+        segment.forEach(n => {
+          const pt = toScreenCoords(n.coordinates);
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeStyle = '#2563eb';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, Math.max(4 * zoom, 3), 0, 2 * Math.PI);
+          ctx.fill();
+          ctx.stroke();
+        });
+      });
+
+      // Highlight Floor Transition Points (Elevator / Stairs / Bridge)
+      if (routeResult.transitions && routeResult.transitions.length > 0) {
+        routeResult.transitions.forEach(tr => {
+          const fromNode = allNodeMap.get(tr.fromNodeId);
+          const toNode = allNodeMap.get(tr.toNodeId);
+
+          // If fromNode is on this floor
+          if (fromNode && fromNode.floorId === currentFloorId) {
+            const pt = toScreenCoords(fromNode.coordinates);
+            ctx.save();
+            ctx.fillStyle = tr.type === 'elevator' ? '#7c3aed' : '#d97706';
+            ctx.shadowColor = 'rgba(0,0,0,0.2)';
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, Math.max(14 * zoom, 10), 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${Math.max(10 * zoom, 8)}px Inter, sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const iconText = tr.type === 'elevator' ? '🛗' : '🪜';
+            ctx.fillText(iconText, pt.x, pt.y);
+
+            // Transition callout badge
+            ctx.fillStyle = '#1e293b';
+            ctx.font = `bold ${Math.max(10 * zoom, 9)}px Inter, sans-serif`;
+            const badgeY = pt.y - Math.max(18 * zoom, 14);
+            const badgeText = `${tr.type === 'elevator' ? 'Elevator' : 'Stairs'} → Next Floor`;
+            const tw = ctx.measureText(badgeText).width;
+
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+            ctx.beginPath();
+            ctx.roundRect(pt.x - tw / 2 - 6, badgeY - 10, tw + 12, 18, 4);
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(badgeText, pt.x, badgeY - 1);
+            ctx.restore();
+          }
+
+          // If toNode is on this floor (arrival from another floor)
+          if (toNode && toNode.floorId === currentFloorId && fromNode?.floorId !== currentFloorId) {
+            const pt = toScreenCoords(toNode.coordinates);
+            ctx.save();
+            ctx.fillStyle = '#059669';
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, Math.max(12 * zoom, 9), 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${Math.max(9 * zoom, 8)}px Inter, sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('ENTRY', pt.x, pt.y);
+            ctx.restore();
+          }
+        });
+      }
+    }
+
+    // 4. Draw Objects / POIs on this floor
+    floorObjects.forEach(obj => {
+      const pt = toScreenCoords(obj.coordinates);
+      const isStart = sourceObj?.id === obj.id;
+      const isEnd = destObj?.id === obj.id;
+      const isSelected = selectedObj?.id === obj.id;
+
+      const radius = Math.max((isStart || isEnd || isSelected ? 18 : 14) * zoom, 8);
+
+      // Color coding per category
+      let fillColor = '#e0e7ff';
+      let strokeColor = '#4f46e5';
+
+      if (obj.category === 'lab') {
+        fillColor = '#fef3c7'; strokeColor = '#d97706';
+      } else if (obj.category === 'accessible_restroom') {
+        fillColor = '#dbeafe'; strokeColor = '#2563eb';
+      } else if (obj.category === 'auditorium' || obj.category === 'room') {
+        fillColor = '#f3e8ff'; strokeColor = '#9333ea';
+      } else if (obj.category === 'entrance') {
+        fillColor = '#d1fae5'; strokeColor = '#059669';
+      } else if (obj.category === 'landmark') {
+        fillColor = '#fee2e2'; strokeColor = '#dc2626';
+      }
+
+      ctx.save();
+      // Highlight halo if start/destination/selected
+      if (isStart) {
+        ctx.strokeStyle = 'rgba(16, 185, 129, 0.4)';
+        ctx.lineWidth = radius * 0.8;
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, radius + 4, 0, 2 * Math.PI); ctx.stroke();
+        fillColor = '#10b981';
+        strokeColor = '#047857';
+      } else if (isEnd) {
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)';
+        ctx.lineWidth = radius * 0.8;
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, radius + 4, 0, 2 * Math.PI); ctx.stroke();
+        fillColor = '#ef4444';
+        strokeColor = '#b91c1c';
+      } else if (isSelected) {
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.35)';
+        ctx.lineWidth = radius * 0.6;
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, radius + 3, 0, 2 * Math.PI); ctx.stroke();
+      }
+
+      // Draw object circle
+      ctx.fillStyle = fillColor;
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = Math.max(2.5 * zoom, 1.5);
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.08)';
+      ctx.shadowBlur = 4;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, radius, 0, 2 * Math.PI);
       ctx.fill();
       ctx.stroke();
 
-      // Label
-      ctx.fillStyle = '#1e293b';
-      ctx.font = '12px Inter, sans-serif';
-      ctx.textAlign = 'center';
-      const label = typeof obj.name === 'string' ? obj.name : (obj.name.en || 'Unknown');
-      ctx.fillText(label, px, py + 25);
-    });
-
-    // Draw nodes
-    floorNodes.forEach(node => {
-      const px = (node.coordinates.x / 100) * width;
-      const py = (node.coordinates.y / 100) * height;
-
-      ctx.fillStyle = node.type === 'door' ? '#fbbf24' : '#94a3b8';
-      ctx.beginPath();
-      ctx.arc(px, py, 4, 0, 2 * Math.PI);
-      ctx.fill();
-    });
-
-    // Draw Route
-    if (routeResult && routeResult.nodes) {
-      // Map string IDs to full SpatialNode objects
-      const fullPathNodes = routeResult.nodes.map((id: string) => nodes.find(n => n.id === id)).filter(Boolean) as SpatialNode[];
-      
-      const pathNodesOnFloor = fullPathNodes.filter(n => n.floorId === currentFloorId);
-      
-      if (pathNodesOnFloor.length > 0) {
-        ctx.strokeStyle = '#3b82f6'; // Blue route
-        ctx.lineWidth = 4;
-        ctx.setLineDash([8, 6]);
-        ctx.beginPath();
-
-        let started = false;
-        
-        for (let i = 0; i < fullPathNodes.length; i++) {
-          const node = fullPathNodes[i];
-          if (node.floorId === currentFloorId) {
-            const px = (node.coordinates.x / 100) * width;
-            const py = (node.coordinates.y / 100) * height;
-            
-            if (!started) {
-              ctx.moveTo(px, py);
-              started = true;
-            } else {
-              const prev = fullPathNodes[i - 1];
-              if (prev && prev.floorId === currentFloorId) {
-                ctx.lineTo(px, py);
-              } else {
-                ctx.moveTo(px, py); // Start new segment
-              }
-            }
-          } else {
-            started = false; // Break path segment
-          }
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
+      // Pin badge for Start / Destination
+      if (isStart || isEnd) {
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${Math.max(10 * zoom, 8)}px Inter, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(isStart ? 'A' : 'B', pt.x, pt.y);
+      } else {
+        // Category initials or dot
+        ctx.fillStyle = strokeColor;
+        ctx.font = `bold ${Math.max(9 * zoom, 7)}px Inter, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const initial = (obj.category?.[0] || 'O').toUpperCase();
+        ctx.fillText(initial, pt.x, pt.y);
       }
-    }
-  }, [objects, nodes, routeResult, currentFloorId, width, height]);
 
-  // Click handler
-  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!onObjectClick) return;
+      // Label below object
+      const label = typeof obj.name === 'string' ? obj.name : (obj.name?.en || obj.code);
+      ctx.font = `${isStart || isEnd ? 'bold' : '500'} ${Math.max(11 * zoom, 9)}px Inter, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+
+      const labelY = pt.y + radius + 4;
+      const textWidth = ctx.measureText(label).width;
+
+      // Label background plate for legibility
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.beginPath();
+      ctx.roundRect(pt.x - textWidth / 2 - 3, labelY - 1, textWidth + 6, 14 * zoom, 3);
+      ctx.fill();
+
+      ctx.fillStyle = isStart ? '#065f46' : isEnd ? '#991b1b' : '#1e293b';
+      ctx.fillText(label, pt.x, labelY);
+      ctx.restore();
+    });
+
+  }, [dimensions, zoom, pan, objects, nodes, connections, routeResult, currentFloorId, sourceObj, destObj, selectedObj, toScreenCoords]);
+
+  // Click handler to select object or open popover
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
-    
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
 
-    const pxCoord = (x / width) * 100;
-    const pyCoord = (y / height) * 100;
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
 
     const floorObjects = objects.filter(o => o.floorId === currentFloorId);
-    
-    // Find closest object
+
+    // Hit-test in screen coordinates
+    let hit: MapObject | null = null;
     for (const obj of floorObjects) {
-      const dx = obj.coordinates.x - pxCoord;
-      const dy = obj.coordinates.y - pyCoord;
-      // if click is within ~5% of coordinates
-      if (Math.sqrt(dx * dx + dy * dy) < 5) {
-        onObjectClick(obj);
-        return;
+      const pt = toScreenCoords(obj.coordinates);
+      const dist = Math.hypot(pt.x - clickX, pt.y - clickY);
+      if (dist <= Math.max(22 * zoom, 16)) {
+        hit = obj;
+        break;
       }
+    }
+
+    if (hit) {
+      setSelectedObj(hit);
+      if (onObjectClick) onObjectClick(hit);
+    } else {
+      setSelectedObj(null);
     }
   };
 
+  // Mouse wheel zoom centered on cursor
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+    setZoom(prev => Math.min(Math.max(0.5, prev * zoomFactor), 4));
+  };
+
+  // Drag pan handlers
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    setIsDragging(true);
+    setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDragging) return;
+    setPan({
+      x: e.clientX - dragStart.x,
+      y: e.clientY - dragStart.y,
+    });
+  };
+
+  const handleMouseUp = () => setIsDragging(false);
+
+  // Touch handlers for mobile pan & pinch-zoom
+  const touchStartRef = useRef<{ x: number; y: number; dist?: number }>({ x: 0, y: 0 });
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 1) {
+      touchStartRef.current = {
+        x: e.touches[0].clientX - pan.x,
+        y: e.touches[0].clientY - pan.y,
+      };
+      setIsDragging(true);
+    } else if (e.touches.length === 2) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      touchStartRef.current.dist = dist;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 1 && isDragging) {
+      setPan({
+        x: e.touches[0].clientX - touchStartRef.current.x,
+        y: e.touches[0].clientY - touchStartRef.current.y,
+      });
+    } else if (e.touches.length === 2 && touchStartRef.current.dist) {
+      const newDist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const scale = newDist / touchStartRef.current.dist;
+      setZoom(prev => Math.min(Math.max(0.5, prev * scale), 4));
+      touchStartRef.current.dist = newDist;
+    }
+  };
+
+  const handleTouchEnd = () => setIsDragging(false);
+
+  // Selected object position for popover
+  const selectedObjScreen = selectedObj ? toScreenCoords(selectedObj.coordinates) : null;
+
   return (
-    <div className="relative border border-slate-200 rounded-lg overflow-hidden bg-white shadow-sm">
+    <div ref={containerRef} className="relative w-full h-full bg-slate-100 overflow-hidden select-none">
       <canvas
         ref={canvasRef}
-        width={width}
-        height={height}
-        onClick={handleClick}
-        className="block w-full h-auto cursor-pointer"
-        style={{ maxWidth: '100%' }}
+        onClick={handleCanvasClick}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        className={`w-full h-full block ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
       />
+
+      {/* Floating Zoom / Pan Controls */}
+      <div className="absolute bottom-5 right-5 flex flex-col gap-1.5 bg-white/95 backdrop-blur-sm rounded-xl p-1 shadow-lg border border-slate-200 z-20">
+        <button
+          onClick={() => handleZoom(1.2)}
+          title="Zoom in"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-700 hover:bg-slate-100 transition-colors"
+        >
+          <Plus size={18} />
+        </button>
+        <button
+          onClick={() => handleZoom(0.8)}
+          title="Zoom out"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-700 hover:bg-slate-100 transition-colors"
+        >
+          <Minus size={18} />
+        </button>
+        <div className="h-px bg-slate-200 mx-1" />
+        <button
+          onClick={resetView}
+          title="Reset View"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-700 hover:bg-slate-100 transition-colors text-xs font-mono"
+        >
+          <RotateCcw size={15} />
+        </button>
+      </div>
+
+      {/* Selected Object Action Popover */}
+      {selectedObj && selectedObjScreen && (
+        <div 
+          className="absolute z-30 bg-white rounded-xl shadow-xl border border-slate-200 p-4 w-64 animate-in fade-in zoom-in-95 pointer-events-auto"
+          style={{
+            left: Math.min(Math.max(16, selectedObjScreen.x - 128), dimensions.width - 270),
+            top: Math.max(16, selectedObjScreen.y - 130),
+          }}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h4 className="font-outfit font-bold text-slate-900 text-sm">
+                {typeof selectedObj.name === 'string' ? selectedObj.name : selectedObj.name.en}
+              </h4>
+              <p className="text-xs font-mono text-slate-400">{selectedObj.code}</p>
+            </div>
+            <button
+              onClick={() => setSelectedObj(null)}
+              className="text-slate-400 hover:text-slate-600 rounded-md p-1"
+            >
+              <X size={14} />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5 mt-2">
+            <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+              {selectedObj.category.replace(/_/g, ' ')}
+            </span>
+            {selectedObj.isAccessible && (
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                <Check size={10} /> Accessible
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-slate-100">
+            <button
+              onClick={() => {
+                if (onSelectAsSource) onSelectAsSource(selectedObj);
+                setSelectedObj(null);
+              }}
+              className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors border border-emerald-200"
+            >
+              <MapPin size={12} /> Set as Start
+            </button>
+            <button
+              onClick={() => {
+                if (onSelectAsDestination) onSelectAsDestination(selectedObj);
+                setSelectedObj(null);
+              }}
+              className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors border border-blue-200"
+            >
+              <Navigation size={12} /> Set as Dest
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -96,6 +96,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const [edgeStartNodeId, setEdgeStartNodeId] = useState<string | null>(null);
   const [mouseCanvasPos, setMouseCanvasPos] = useState<Point2D>({ x: 0, y: 0 });
 
+  // Multi-point polygon drawing state
+  const [polygonDraftPoints, setPolygonDraftPoints] = useState<number[]>([]);
+
   // Loaded background floorplan image
   const [bgImage, setBgImage] = useState<HTMLImageElement | null>(null);
 
@@ -122,19 +125,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   }, [zoom]);
 
-  // Cancel edge start if tool changes
+  // Cancel edge or polygon draft if tool changes
   useEffect(() => {
     if (tool !== 'add_edge') {
       setEdgeStartNodeId(null);
     }
+    if (tool !== 'polygon') {
+      setPolygonDraftPoints([]);
+    }
   }, [tool]);
 
-  // Spacebar listener for temporary pan gesture
+  // Spacebar and Enter/Escape listeners
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
       if (e.code === 'Space' && !e.repeat && tool !== 'pan') {
         setIsSpacePanning(true);
+      }
+      if (e.key === 'Enter' && tool === 'polygon') {
+        finishPolygon();
+      }
+      if (e.key === 'Escape' && tool === 'polygon') {
+        setPolygonDraftPoints([]);
+        onDraftMeasure({ x: 0, y: 0, w: 0, h: 0, type: null, visible: false });
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -148,7 +161,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [tool]);
+  }, [tool, polygonDraftPoints]);
 
   // Observe container size
   useEffect(() => {
@@ -165,6 +178,67 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   }, []);
 
   const snap = (val: number) => (isSnapping ? Math.round(val / gridSize) * gridSize : val);
+
+  // Finalize polygon multi-click drawing
+  const finishPolygon = useCallback((extraPoint?: { x: number; y: number }) => {
+    let pts = [...polygonDraftPoints];
+    if (extraPoint) {
+      pts.push(extraPoint.x, extraPoint.y);
+    }
+    if (pts.length < 6) {
+      setPolygonDraftPoints([]);
+      return;
+    }
+    const xs = pts.filter((_, i) => i % 2 === 0);
+    const ys = pts.filter((_, i) => i % 2 === 1);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const maxX = Math.max(...xs);
+    const maxY = Math.max(...ys);
+    const width = Math.max(5, maxX - minX);
+    const height = Math.max(5, maxY - minY);
+
+    // Compute polygon area using Shoelace formula
+    let areaPx = 0;
+    const numPts = pts.length / 2;
+    for (let i = 0; i < numPts; i++) {
+      const x1 = pts[i * 2];
+      const y1 = pts[i * 2 + 1];
+      const x2 = pts[((i + 1) % numPts) * 2];
+      const y2 = pts[((i + 1) % numPts) * 2 + 1];
+      areaPx += (x1 * y2) - (x2 * y1);
+    }
+    areaPx = Math.abs(areaPx) / 2;
+    const pxPerM = calibration.canvasWidthPx / calibration.realWidthMeters;
+    const areaM2 = areaPx / (pxPerM * pxPerM);
+
+    const finalShape: EditorShape = {
+      id: uuidv4(),
+      objectTypeId: activeType?.id || 'generic',
+      geometryType: 'polygon',
+      points: pts,
+      x: minX,
+      y: minY,
+      width,
+      height,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      name: activeType ? `New ${activeType.name}` : 'New Polygon Area',
+      color: activeType?.color || '#3b82f6',
+      realWorld: {
+        originXMeters: pxToMeters(minX, calibration),
+        originYMeters: pxToMeters(minY, calibration),
+        widthMeters: width / pxPerM,
+        heightMeters: height / pxPerM,
+        areaM2,
+        rotationDeg: 0,
+      },
+    };
+    onShapeFinalized(finalShape);
+    setPolygonDraftPoints([]);
+    onDraftMeasure({ x: 0, y: 0, w: 0, h: 0, type: null, visible: false });
+  }, [polygonDraftPoints, activeType, calibration, onShapeFinalized, onDraftMeasure]);
 
   // Fit to view calculation
   const fitToView = useCallback(() => {
@@ -310,6 +384,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
+    // Tool: Polygon (click-to-place multi-vertex drawing)
+    if (tool === 'polygon') {
+      if (polygonDraftPoints.length === 0) {
+        setPolygonDraftPoints([sp.x, sp.y]);
+      } else {
+        const startX = polygonDraftPoints[0];
+        const startY = polygonDraftPoints[1];
+        const distToStart = Math.hypot(sp.x - startX, sp.y - startY);
+        if (distToStart < 15 && polygonDraftPoints.length >= 6) {
+          finishPolygon();
+        } else {
+          setPolygonDraftPoints(prev => [...prev, sp.x, sp.y]);
+        }
+      }
+      return;
+    }
+
     // Tool: Add Edge
     if (tool === 'add_edge') {
       return;
@@ -353,6 +444,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     // Handle active marquee box update
     if (isMarqueeSelecting) {
       setMarqueeCurrent(pos);
+      return;
+    }
+
+    // Handle polygon draft live preview
+    if (tool === 'polygon' && polygonDraftPoints.length > 0) {
+      const curPt = { x: snap(pos.x), y: snap(pos.y) };
+      const allX = [...polygonDraftPoints.filter((_, i) => i % 2 === 0), curPt.x];
+      const allY = [...polygonDraftPoints.filter((_, i) => i % 2 === 1), curPt.y];
+      const minX = Math.min(...allX);
+      const minY = Math.min(...allY);
+      const maxX = Math.max(...allX);
+      const maxY = Math.max(...allY);
+      const stagePos = stageRef.current.getPointerPosition();
+      if (stagePos) {
+        onDraftMeasure({
+          x: stagePos.x,
+          y: stagePos.y,
+          w: maxX - minX,
+          h: maxY - minY,
+          type: 'polygon',
+          visible: true,
+        });
+      }
       return;
     }
 
@@ -525,14 +639,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     const node = e.target;
     const newX = snap(node.x());
     const newY = snap(node.y());
+    node.x(newX);
+    node.y(newY);
     setShapes(prev => prev.map(s => {
       if (s.id !== id) return s;
+      const dx = newX - s.x;
+      const dy = newY - s.y;
+      const updatedPoints = s.points ? s.points.map((p, i) => i % 2 === 0 ? p + dx : p + dy) : s.points;
       const xM = pxToMeters(newX, calibration);
       const yM = pxToMeters(newY, calibration);
       return {
         ...s,
         x: newX,
         y: newY,
+        points: updatedPoints,
         realWorld: s.realWorld ? {
           ...s.realWorld,
           originXMeters: xM,
@@ -547,8 +667,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     const id = node.id();
     setShapes(prev => prev.map(s => {
       if (s.id !== id) return s;
-      const newW = Math.max(5, (s.width || 0) * node.scaleX());
-      const newH = Math.max(5, (s.height || 0) * node.scaleY());
+      const scaleX = node.scaleX();
+      const scaleY = node.scaleY();
+      const newW = Math.max(5, (s.width || 0) * scaleX);
+      const newH = Math.max(5, (s.height || 0) * scaleY);
       node.scaleX(1);
       node.scaleY(1);
       const newX = snap(node.x());
@@ -558,12 +680,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       const hM = pxToMeters(newH, calibration);
       const xM = pxToMeters(newX, calibration);
       const yM = pxToMeters(newY, calibration);
+      const updatedPoints = s.points && s.points.length > 4
+        ? s.points.map((p, i) => i % 2 === 0 ? newX + (p - s.x) * scaleX : newY + (p - s.y) * scaleY)
+        : s.points;
       return {
         ...s,
         x: newX,
         y: newY,
         width: newW,
         height: newH,
+        points: updatedPoints,
         scaleX: 1,
         scaleY: 1,
         rotation: rot,
@@ -585,10 +711,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // Find start node for rubber band edge
   const edgeStartNode = edgeStartNodeId ? nodeMap.get(edgeStartNodeId) : null;
 
-  // Set of node IDs with validation warnings
+  // Set of entity IDs with validation issues
   const warningNodeIds = new Set(
     validationIssues
       .filter(i => i.category === 'node')
+      .map(i => i.entityId)
+  );
+  const warningObjectIssues = new Map(
+    validationIssues
+      .filter(i => i.category === 'object')
+      .map(i => [i.entityId, i])
+  );
+  const warningEdgeIds = new Set(
+    validationIssues
+      .filter(i => i.category === 'edge' || i.category === 'transition')
       .map(i => i.entityId)
   );
 
@@ -632,6 +768,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onDblClick={() => {
+          if (tool === 'polygon' && polygonDraftPoints.length >= 6) {
+            finishPolygon();
+          }
+        }}
         scaleX={scale}
         scaleY={scale}
         x={position.x}
@@ -696,36 +837,76 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             {allShapes.map(shape => {
               const isSelected = selectedIds.includes(shape.id);
               const isDraft = shape.id.startsWith('draft_');
-              const strokeColor = isSelected ? '#2563eb' : shape.color;
-              const strokeW = isSelected ? 3 : 2;
+              const objIssue = layers.validationWarnings
+                ? (warningObjectIssues.get(shape.objectId || '') || warningObjectIssues.get(shape.id))
+                : undefined;
+              const strokeColor = isSelected
+                ? '#2563eb'
+                : objIssue
+                ? (objIssue.type === 'error' ? '#ef4444' : '#f59e0b')
+                : shape.color;
+              const strokeW = isSelected ? 3 : objIssue ? 2.5 : 2;
+              const dashPattern = isDraft ? [6, 4] : objIssue ? [5, 3] : [];
 
               if (shape.geometryType === 'polygon') {
+                const hasCustomVertices = shape.points && shape.points.length > 4;
                 return (
                   <Group key={shape.id}>
-                    <Rect
-                      id={shape.id}
-                      x={shape.x} y={shape.y}
-                      width={shape.width || 10} height={shape.height || 10}
-                      fill={`${shape.color}25`}
-                      stroke={isDraft ? '#94a3b8' : strokeColor}
-                      strokeWidth={strokeW}
-                      dash={isDraft ? [6, 4] : []}
-                      draggable={tool === 'select' && isSelected && !isDraft}
-                      onDragEnd={handleDragEnd}
-                      onTransformEnd={handleTransformEnd}
-                      onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
-                      rotation={shape.rotation}
-                      cornerRadius={2}
-                    />
+                    {hasCustomVertices ? (
+                      <Line
+                        id={shape.id}
+                        x={shape.x}
+                        y={shape.y}
+                        points={shape.points.map((p, i) => (i % 2 === 0 ? p - shape.x : p - shape.y))}
+                        closed={true}
+                        fill={`${shape.color}25`}
+                        stroke={isDraft ? '#94a3b8' : strokeColor}
+                        strokeWidth={strokeW}
+                        dash={dashPattern}
+                        draggable={tool === 'select' && isSelected && !isDraft}
+                        onDragEnd={handleDragEnd}
+                        onTransformEnd={handleTransformEnd}
+                        onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        rotation={shape.rotation}
+                      />
+                    ) : (
+                      <Rect
+                        id={shape.id}
+                        x={shape.x} y={shape.y}
+                        width={shape.width || 10} height={shape.height || 10}
+                        fill={`${shape.color}25`}
+                        stroke={isDraft ? '#94a3b8' : strokeColor}
+                        strokeWidth={strokeW}
+                        dash={dashPattern}
+                        draggable={tool === 'select' && isSelected && !isDraft}
+                        onDragEnd={handleDragEnd}
+                        onTransformEnd={handleTransformEnd}
+                        onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        rotation={shape.rotation}
+                        cornerRadius={2}
+                      />
+                    )}
                     {!isDraft && (
                       <Group x={shape.x + 4} y={shape.y - 15}>
                         <Rect
-                          width={shape.name.length * 6.5 + 8}
+                          width={shape.name.length * 6.5 + (objIssue ? 26 : 8)}
                           height={14}
-                          fill="rgba(255,255,255,0.85)"
+                          fill="rgba(255,255,255,0.9)"
                           cornerRadius={3}
+                          stroke={objIssue ? (objIssue.type === 'error' ? '#ef4444' : '#f59e0b') : 'transparent'}
+                          strokeWidth={objIssue ? 1 : 0}
                         />
                         <Text x={4} y={2} text={shape.name} fontSize={10} fill={shape.color} fontStyle="bold" />
+                        {objIssue && (
+                          <Text
+                            x={shape.name.length * 6.5 + 8}
+                            y={2}
+                            text="⚠"
+                            fontSize={10}
+                            fill={objIssue.type === 'error' ? '#ef4444' : '#f59e0b'}
+                            fontStyle="bold"
+                          />
+                        )}
                       </Group>
                     )}
                   </Group>
@@ -812,6 +993,35 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               return null;
             })}
 
+            {/* Polygon Draft Visualization */}
+            {polygonDraftPoints.length > 0 && (
+              <Group listening={false}>
+                <Line
+                  points={[...polygonDraftPoints, snap(mouseCanvasPos.x), snap(mouseCanvasPos.y)]}
+                  stroke="#3b82f6"
+                  strokeWidth={2}
+                  dash={[4, 4]}
+                />
+                {polygonDraftPoints.map((val, idx) => {
+                  if (idx % 2 !== 0) return null;
+                  const vx = val;
+                  const vy = polygonDraftPoints[idx + 1];
+                  const isFirst = idx === 0;
+                  return (
+                    <Circle
+                      key={`poly_draft_${idx}`}
+                      x={vx}
+                      y={vy}
+                      radius={isFirst ? 6 : 4}
+                      fill={isFirst ? '#2563eb' : '#3b82f6'}
+                      stroke="#ffffff"
+                      strokeWidth={2}
+                    />
+                  );
+                })}
+              </Group>
+            )}
+
             <Transformer
               ref={transformerRef}
               enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
@@ -829,11 +1039,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               if (!src || !tgt) return null;
 
               const isSelected = selectedEdgeId === conn.id;
+              const hasWarning = layers.validationWarnings && warningEdgeIds.has(conn.id);
               const isStairs = conn.connectionType === 'staircase';
               const isElevator = conn.connectionType === 'elevator';
               const isDoor = conn.connectionType === 'door';
 
-              const strokeColor = isSelected ? '#2563eb' : isStairs ? '#8b5cf6' : isElevator ? '#10b981' : isDoor ? '#f59e0b' : '#64748b';
+              const strokeColor = isSelected
+                ? '#2563eb'
+                : hasWarning
+                ? '#f59e0b'
+                : isStairs
+                ? '#8b5cf6'
+                : isElevator
+                ? '#10b981'
+                : isDoor
+                ? '#f59e0b'
+                : '#64748b';
               const strokeW = isSelected ? 4 : isStairs || isElevator ? 3 : 2.5;
 
               return (
@@ -848,12 +1069,21 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     stroke="transparent"
                     strokeWidth={14}
                   />
+                  {/* Warning halo */}
+                  {hasWarning && (
+                    <Line
+                      points={[src.coordinates.x, src.coordinates.y, tgt.coordinates.x, tgt.coordinates.y]}
+                      stroke="#f59e0b50"
+                      strokeWidth={strokeW + 6}
+                      lineCap="round"
+                    />
+                  )}
                   {/* Visual line */}
                   <Line
                     points={[src.coordinates.x, src.coordinates.y, tgt.coordinates.x, tgt.coordinates.y]}
                     stroke={strokeColor}
                     strokeWidth={strokeW}
-                    dash={isStairs ? [6, 4] : isElevator ? [3, 3] : []}
+                    dash={hasWarning ? [5, 3] : isStairs ? [6, 4] : isElevator ? [3, 3] : []}
                     lineCap="round"
                   />
                 </Group>

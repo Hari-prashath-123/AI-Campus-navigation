@@ -1,12 +1,13 @@
 import React from 'react';
 import { GraphValidationReport, GraphValidationError } from '../../utils/graph-validation';
-import { AlertTriangle, CheckCircle2, AlertCircle, ChevronRight, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, AlertCircle, ChevronRight, X, Sparkles } from 'lucide-react';
 
 interface ValidationPanelProps {
   report: GraphValidationReport;
   isOpen: boolean;
   onClose: () => void;
   onSelectEntity?: (entityId: string, category: string) => void;
+  onRebuildGraph?: () => void;
 }
 
 export const ValidationPanel: React.FC<ValidationPanelProps> = ({
@@ -14,6 +15,7 @@ export const ValidationPanel: React.FC<ValidationPanelProps> = ({
   isOpen,
   onClose,
   onSelectEntity,
+  onRebuildGraph,
 }) => {
   if (!isOpen) return null;
 
@@ -88,7 +90,7 @@ export const ValidationPanel: React.FC<ValidationPanelProps> = ({
                     <div className="flex items-center justify-between">
                       <h4 className="font-semibold text-slate-800 truncate">{issue.title}</h4>
                       <span className="text-[10px] uppercase font-mono px-1 rounded bg-white/70 border border-slate-200 text-slate-500">
-                        {issue.category}
+                        {issue.subType ? issue.subType.replace('_', ' ') : issue.category}
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">{issue.description}</p>
@@ -100,6 +102,19 @@ export const ValidationPanel: React.FC<ValidationPanelProps> = ({
           })
         )}
       </div>
+
+      {onRebuildGraph && (
+        <div className="p-3 bg-slate-50 border-t border-slate-200">
+          <button
+            onClick={onRebuildGraph}
+            className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs shadow-xs transition-colors"
+            title="Convert drawn walkable paths, doors, and rooms into clean navigation nodes & edges"
+          >
+            <Sparkles size={14} />
+            <span>Generate & Clean Graph</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -5,7 +5,8 @@ import { Input } from '../ui/Input';
 import {
   Layers, Loader2, Ruler, Copy, X, Trash2, MapPin, GitBranch,
   DoorOpen, Image, Upload, RotateCcw, Maximize2,
-  AlignLeft, AlignCenter, AlignRight, ShieldCheck, Check
+  AlignLeft, AlignCenter, AlignRight,
+  ShieldCheck, Check
 } from 'lucide-react';
 import { objectTypeService } from '../../api/object-type.service';
 import { Button } from '../ui/Button';
@@ -36,6 +37,8 @@ interface EditorSidebarProps {
     nodesCount: number;
     edgesCount: number;
   };
+  /** Called when the user clicks the ✕ / close button inside the sidebar */
+  onClose?: () => void;
 }
 
 const NODE_TYPES: { value: SpatialNodeType; label: string }[] = [
@@ -80,6 +83,7 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
   onUpdateFloorOverlay,
   onFitToView,
   totalStats,
+  onClose,
 }) => {
   const [typeDef, setTypeDef] = useState<ObjectType | null>(null);
   const [loading, setLoading] = useState(false);
@@ -123,7 +127,7 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
     }
   }, [shape?.objectTypeId]);
 
-  const closeSidebar = () => document.getElementById('editor-sidebar')?.classList.add('hidden');
+  const closeSidebar = () => onClose?.();
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -371,6 +375,16 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
               />
               <span className="font-medium text-slate-800">Pedestrian Walkable</span>
             </label>
+
+            <label className="flex items-center gap-2.5 p-2 bg-slate-50 border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-100">
+              <input
+                type="checkbox"
+                checked={Boolean(selectedEdge.isRestricted)}
+                onChange={e => onUpdateEdge?.(selectedEdge.id, { isRestricted: e.target.checked })}
+                className="rounded border-slate-300 text-amber-600"
+              />
+              <span className="font-medium text-slate-800">Restricted / Staff Access Only</span>
+            </label>
           </div>
         </div>
       </div>
@@ -406,27 +420,52 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
           {/* Bulk Alignment Tools */}
           <div>
             <label className="block font-semibold text-slate-700 mb-2">Align Objects</label>
-            <div className="grid grid-cols-3 gap-1.5">
+            {/* Horizontal alignment */}
+            <div className="grid grid-cols-3 gap-1.5 mb-1.5">
               <button
                 onClick={() => onBulkAlign?.('left')}
                 className="flex items-center justify-center gap-1 p-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md font-medium text-slate-700"
-                title="Align Left"
+                title="Align Left edges"
               >
                 <AlignLeft size={14} /> Left
               </button>
               <button
                 onClick={() => onBulkAlign?.('center')}
                 className="flex items-center justify-center gap-1 p-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md font-medium text-slate-700"
-                title="Align Center"
+                title="Align horizontal centres"
               >
                 <AlignCenter size={14} /> Center
               </button>
               <button
                 onClick={() => onBulkAlign?.('right')}
                 className="flex items-center justify-center gap-1 p-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md font-medium text-slate-700"
-                title="Align Right"
+                title="Align Right edges"
               >
                 <AlignRight size={14} /> Right
+              </button>
+            </div>
+            {/* Vertical alignment */}
+            <div className="grid grid-cols-3 gap-1.5">
+              <button
+                onClick={() => onBulkAlign?.('top')}
+                className="flex items-center justify-center gap-1 p-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md font-medium text-slate-700"
+                title="Align Top edges"
+              >
+                <AlignLeft size={14} className="rotate-90" /> Top
+              </button>
+              <button
+                onClick={() => onBulkAlign?.('middle')}
+                className="flex items-center justify-center gap-1 p-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md font-medium text-slate-700"
+                title="Align vertical midpoints"
+              >
+                <AlignCenter size={14} className="rotate-90" /> Middle
+              </button>
+              <button
+                onClick={() => onBulkAlign?.('bottom')}
+                className="flex items-center justify-center gap-1 p-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md font-medium text-slate-700"
+                title="Align Bottom edges"
+              >
+                <AlignRight size={14} className="rotate-90" /> Bottom
               </button>
             </div>
           </div>
@@ -462,8 +501,16 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
       <div className="w-80 bg-white border-l border-slate-200 h-full flex flex-col shadow-sm z-10">
         <div className="p-4 border-b border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded bg-slate-100 flex items-center justify-center">
+            {/* Colour swatch – click to open native colour picker */}
+            <div className="relative w-8 h-8 rounded bg-slate-100 flex items-center justify-center cursor-pointer" title="Click to change shape colour">
               <div className="w-4 h-4 rounded-sm" style={{ backgroundColor: shape.color }}></div>
+              <input
+                type="color"
+                value={shape.color || '#3b82f6'}
+                onChange={e => updateShape(shape.id, { color: e.target.value })}
+                className="absolute inset-0 opacity-0 cursor-pointer w-full h-full rounded"
+                title="Shape colour"
+              />
             </div>
             <div>
               <h3 className="font-outfit font-semibold text-slate-900 truncate max-w-[150px]">{shape.name}</h3>
@@ -492,16 +539,22 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
             />
 
             {/* Associated Navigation Door / Node */}
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1.5">
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
                   <DoorOpen size={14} className="text-amber-600" />
-                  Entrance Node / Door
+                  Primary Entrance Door
                 </span>
               </div>
               <select
                 value={shape.attributes?.associatedNodeId || ''}
-                onChange={e => handleAttributeChange('associatedNodeId', e.target.value)}
+                onChange={e => {
+                  const val = e.target.value;
+                  const currentList = shape.attributes?.entranceNodeIds || [];
+                  const updatedList = val ? Array.from(new Set([val, ...currentList])) : currentList;
+                  handleAttributeChange('associatedNodeId', val);
+                  handleAttributeChange('entranceNodeIds', updatedList);
+                }}
                 className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded bg-white"
               >
                 <option value="">No door assigned (unconnected)</option>
@@ -511,8 +564,40 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
                   </option>
                 ))}
               </select>
+
+              {/* Multiple Entrances Multi-Select Checkboxes */}
+              {availableNodes.filter(n => n.type === 'door' || n.type === 'entrance').length > 1 && (
+                <div className="pt-2 border-t border-slate-200 space-y-1">
+                  <span className="text-[10px] font-semibold text-slate-600 block">All Room Entrances</span>
+                  <div className="max-h-24 overflow-y-auto space-y-1 pr-1">
+                    {availableNodes.filter(n => n.type === 'door' || n.type === 'entrance').map(dn => {
+                      const isChecked = (shape.attributes?.entranceNodeIds || []).includes(dn.id) || shape.attributes?.associatedNodeId === dn.id;
+                      return (
+                        <label key={dn.id} className="flex items-center gap-2 text-[11px] text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={e => {
+                              const prevIds: string[] = shape.attributes?.entranceNodeIds || (shape.attributes?.associatedNodeId ? [shape.attributes.associatedNodeId] : []);
+                              const newIds = e.target.checked
+                                ? Array.from(new Set([...prevIds, dn.id]))
+                                : prevIds.filter(id => id !== dn.id);
+                              handleAttributeChange('entranceNodeIds', newIds);
+                              if (!newIds.includes(shape.attributes?.associatedNodeId)) {
+                                handleAttributeChange('associatedNodeId', newIds[0] || '');
+                              }
+                            }}
+                            className="rounded border-slate-300 text-blue-600"
+                          />
+                          <span className="truncate">{dn.label || `${dn.type} (${Math.round(dn.coordinates.x)}, ${Math.round(dn.coordinates.y)})`}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <p className="text-[10px] text-slate-400">
-                Links this room directly to a door waypoint on the navigation network.
+                Associates room with one or more door waypoints for multi-entrance routing.
               </p>
             </div>
           </div>

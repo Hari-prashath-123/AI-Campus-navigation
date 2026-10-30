@@ -1,5 +1,7 @@
-import { Campus, Building, Floor } from '../types';
+import { Campus, Building, Floor, LocalizedString } from '../types';
 import { INITIAL_CAMPUSES, INITIAL_BUILDINGS, INITIAL_FLOORS } from './mock-data';
+import { objectStore } from './object.store';
+import { navStore } from './nav.store';
 import { v4 as uuidv4 } from 'uuid';
 
 // ── localStorage persistence helpers ──────────────────────────────────────────
@@ -24,165 +26,399 @@ let campuses:  Campus[]   = load<Campus>(LS_CAMPUSES,  INITIAL_CAMPUSES);
 let buildings: Building[] = load<Building>(LS_BUILDINGS, INITIAL_BUILDINGS);
 let floors:    Floor[]    = load<Floor>(LS_FLOORS,    INITIAL_FLOORS);
 
+export interface DeletionSafetyReport {
+  canDelete: boolean;
+  issues: string[];
+  stats: {
+    buildingsCount?: number;
+    floorsCount?: number;
+    objectsCount?: number;
+    nodesCount?: number;
+    connectionsCount?: number;
+  };
+}
+
 export const campusService = {
   // === CAMPUS ===
-  getCampuses: async (): Promise<{ success: boolean; data: Campus[] }> => {
-    return new Promise(resolve => setTimeout(() => resolve({ success: true, data: campuses }), 200));
+  getCampuses: async (organizationId?: string): Promise<{ success: boolean; data: Campus[] }> => {
+    let result = [...campuses];
+    if (organizationId) {
+      result = result.filter(c => c.organizationId === organizationId);
+    }
+    return { success: true, data: result };
   },
 
   getCampusById: async (id: string): Promise<{ success: boolean; data?: Campus; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const campus = campuses.find(c => c.id === id);
-      if (campus) resolve({ success: true, data: campus });
-      else resolve({ success: false, message: 'Campus not found' });
-    }, 200));
+    const campus = campuses.find(c => c.id === id);
+    if (campus) return { success: true, data: { ...campus } };
+    return { success: false, message: 'Campus not found' };
   },
 
   createCampus: async (data: Partial<Campus>): Promise<{ success: boolean; data?: Campus; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const newCampus: Campus = {
-        id: uuidv4(),
-        slug: data.slug || `campus-${Date.now()}`,
-        name: data.name || { en: 'New Campus' },
-        code: data.code || 'CMP',
-        description: data.description || { en: '' },
-        center: data.center || { lat: 0, lng: 0 },
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+    const now = new Date().toISOString();
+    const newCampus: Campus = {
+      id: data.id || uuidv4(),
+      organizationId: data.organizationId || 'org-omnicampus',
+      slug: data.slug || `campus-${Date.now()}`,
+      name: data.name || { en: 'New Campus' },
+      code: data.code || `CMP-${Math.floor(Math.random() * 900 + 100)}`,
+      description: data.description || { en: '' },
+      center: data.center || { lat: 0, lng: 0 },
+      bounds: data.bounds,
+      logoUrl: data.logoUrl,
+      metadata: data.metadata || {},
+      createdAt: now,
+      updatedAt: now,
+    };
+    campuses = [...campuses, newCampus];
+    save(LS_CAMPUSES, campuses);
+    return { success: true, data: newCampus };
+  },
+
+  updateCampus: async (id: string, data: Partial<Campus>): Promise<{ success: boolean; data?: Campus; message?: string }> => {
+    const idx = campuses.findIndex(c => c.id === id);
+    if (idx === -1) return { success: false, message: 'Not found' };
+
+    const updated: Campus = {
+      ...campuses[idx],
+      ...data,
+      updatedAt: new Date().toISOString(),
+    };
+    campuses = campuses.map((c, i) => i === idx ? updated : c);
+    save(LS_CAMPUSES, campuses);
+    return { success: true, data: updated };
+  },
+
+  canDeleteCampus: async (id: string): Promise<DeletionSafetyReport> => {
+    const relatedBuildings = buildings.filter(b => b.campusId === id);
+    const relatedFloors = floors.filter(f => f.campusId === id);
+    const relatedObjects = objectStore.getByCampus(id);
+    const relatedNodes = navStore.getNodesByCampus(id);
+    const relatedConnections = navStore.getConnectionsByCampus(id);
+
+    const issues: string[] = [];
+    if (relatedBuildings.length > 0) {
+      issues.push(`Campus contains ${relatedBuildings.length} building(s).`);
+    }
+    if (relatedFloors.length > 0) {
+      issues.push(`Campus contains ${relatedFloors.length} floor(s).`);
+    }
+    if (relatedObjects.length > 0) {
+      issues.push(`Campus contains ${relatedObjects.length} object(s)/POI(s).`);
+    }
+    if (relatedNodes.length > 0 || relatedConnections.length > 0) {
+      issues.push(`Campus has ${relatedNodes.length} navigation node(s) and ${relatedConnections.length} connection edge(s).`);
+    }
+
+    return {
+      canDelete: issues.length === 0,
+      issues,
+      stats: {
+        buildingsCount: relatedBuildings.length,
+        floorsCount: relatedFloors.length,
+        objectsCount: relatedObjects.length,
+        nodesCount: relatedNodes.length,
+        connectionsCount: relatedConnections.length,
+      },
+    };
+  },
+
+  deleteCampus: async (id: string, force = false): Promise<{ success: boolean; message?: string }> => {
+    const safety = await campusService.canDeleteCampus(id);
+    if (!safety.canDelete && !force) {
+      return {
+        success: false,
+        message: `Cannot delete campus safely: ${safety.issues.join(' ')} Use force=true to cascade delete.`,
       };
-      campuses = [...campuses, newCampus];
-      save(LS_CAMPUSES, campuses);
-      resolve({ success: true, data: newCampus });
-    }, 300));
-  },
+    }
 
-  updateCampus: async (id: string, data: Partial<Campus>): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const idx = campuses.findIndex(c => c.id === id);
-      if (idx === -1) { resolve({ success: false, message: 'Not found' }); return; }
-      campuses = campuses.map((c, i) => i === idx ? { ...c, ...data, updatedAt: new Date().toISOString() } : c);
-      save(LS_CAMPUSES, campuses);
-      resolve({ success: true });
-    }, 300));
-  },
+    // Perform cascade deletion if force is specified
+    campuses = campuses.filter(c => c.id !== id);
+    buildings = buildings.filter(b => b.campusId !== id);
+    floors = floors.filter(f => f.campusId !== id);
+    save(LS_CAMPUSES, campuses);
+    save(LS_BUILDINGS, buildings);
+    save(LS_FLOORS, floors);
 
-  deleteCampus: async (id: string): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      campuses  = campuses.filter(c => c.id !== id);
-      buildings = buildings.filter(b => b.campusId !== id);
-      floors    = floors.filter(f => f.campusId !== id);
-      save(LS_CAMPUSES, campuses);
-      save(LS_BUILDINGS, buildings);
-      save(LS_FLOORS, floors);
-      resolve({ success: true });
-    }, 300));
+    // Clean objects and navigation graph for this campus
+    const campusObjs = objectStore.getByCampus(id);
+    campusObjs.forEach(o => objectStore.delete(o.id));
+
+    const campusNodes = navStore.getNodesByCampus(id);
+    campusNodes.forEach(n => navStore.deleteNode(n.id));
+
+    const campusConns = navStore.getConnectionsByCampus(id);
+    campusConns.forEach(c => navStore.deleteConnection(c.id));
+
+    return { success: true };
   },
 
   // === BUILDING ===
   getBuildingsByCampus: async (campusId: string): Promise<{ success: boolean; data: Building[] }> => {
-    return new Promise(resolve => setTimeout(() => {
-      resolve({ success: true, data: buildings.filter(b => b.campusId === campusId) });
-    }, 200));
+    return { success: true, data: buildings.filter(b => b.campusId === campusId) };
   },
 
   getBuildingById: async (id: string): Promise<{ success: boolean; data?: Building; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const bld = buildings.find(b => b.id === id);
-      if (bld) resolve({ success: true, data: bld });
-      else resolve({ success: false, message: 'Building not found' });
-    }, 200));
+    const bld = buildings.find(b => b.id === id);
+    if (bld) return { success: true, data: { ...bld } };
+    return { success: false, message: 'Building not found' };
   },
 
   createBuilding: async (data: Partial<Building>): Promise<{ success: boolean; data?: Building; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      if (!data.campusId) return resolve({ success: false, message: 'campusId required' });
-      const newBuilding: Building = {
-        id: uuidv4(),
-        campusId: data.campusId,
-        code: data.code || 'BLD',
-        name: data.name || { en: 'New Building' },
-        description: data.description,
-        totalFloors: data.totalFloors || 1,
-        entranceNodeIds: data.entranceNodeIds || [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+    if (!data.campusId) return { success: false, message: 'campusId required' };
+    const now = new Date().toISOString();
+    const newBuilding: Building = {
+      id: data.id || uuidv4(),
+      campusId: data.campusId,
+      code: data.code || `BLD-${Math.floor(Math.random() * 900 + 100)}`,
+      name: data.name || { en: 'New Building' },
+      description: data.description,
+      totalFloors: data.totalFloors || 1,
+      entranceNodeIds: data.entranceNodeIds || [],
+      geoCenter: data.geoCenter,
+      footprint: data.footprint,
+      createdAt: now,
+      updatedAt: now,
+    };
+    buildings = [...buildings, newBuilding];
+    save(LS_BUILDINGS, buildings);
+    return { success: true, data: newBuilding };
+  },
+
+  updateBuilding: async (id: string, data: Partial<Building>): Promise<{ success: boolean; data?: Building; message?: string }> => {
+    const idx = buildings.findIndex(b => b.id === id);
+    if (idx === -1) return { success: false, message: 'Not found' };
+
+    const updated: Building = {
+      ...buildings[idx],
+      ...data,
+      updatedAt: new Date().toISOString(),
+    };
+    buildings = buildings.map((b, i) => i === idx ? updated : b);
+    save(LS_BUILDINGS, buildings);
+    return { success: true, data: updated };
+  },
+
+  canDeleteBuilding: async (id: string): Promise<DeletionSafetyReport> => {
+    const relatedFloors = floors.filter(f => f.buildingId === id);
+    const relatedObjects = objectStore.getByBuilding(id);
+    const relatedConns = navStore.getConnections().filter(
+      c => c.sourceBuildingId === id || c.targetBuildingId === id
+    );
+
+    const issues: string[] = [];
+    if (relatedFloors.length > 0) {
+      issues.push(`Building contains ${relatedFloors.length} floor(s).`);
+    }
+    if (relatedObjects.length > 0) {
+      issues.push(`Building contains ${relatedObjects.length} object(s).`);
+    }
+    if (relatedConns.length > 0) {
+      issues.push(`Building is connected by ${relatedConns.length} inter-building or cross-floor connection(s).`);
+    }
+
+    return {
+      canDelete: issues.length === 0,
+      issues,
+      stats: {
+        floorsCount: relatedFloors.length,
+        objectsCount: relatedObjects.length,
+        connectionsCount: relatedConns.length,
+      },
+    };
+  },
+
+  deleteBuilding: async (id: string, force = false): Promise<{ success: boolean; message?: string }> => {
+    const safety = await campusService.canDeleteBuilding(id);
+    if (!safety.canDelete && !force) {
+      return {
+        success: false,
+        message: `Cannot delete building safely: ${safety.issues.join(' ')} Use force=true to cascade delete.`,
       };
-      buildings = [...buildings, newBuilding];
-      save(LS_BUILDINGS, buildings);
-      resolve({ success: true, data: newBuilding });
-    }, 300));
-  },
+    }
 
-  updateBuilding: async (id: string, data: Partial<Building>): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const idx = buildings.findIndex(b => b.id === id);
-      if (idx === -1) { resolve({ success: false, message: 'Not found' }); return; }
-      buildings = buildings.map((b, i) => i === idx ? { ...b, ...data, updatedAt: new Date().toISOString() } : b);
-      save(LS_BUILDINGS, buildings);
-      resolve({ success: true });
-    }, 300));
-  },
+    buildings = buildings.filter(b => b.id !== id);
+    floors = floors.filter(f => f.buildingId !== id);
+    save(LS_BUILDINGS, buildings);
+    save(LS_FLOORS, floors);
 
-  deleteBuilding: async (id: string): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      buildings = buildings.filter(b => b.id !== id);
-      floors    = floors.filter(f => f.buildingId !== id);
-      save(LS_BUILDINGS, buildings);
-      save(LS_FLOORS, floors);
-      resolve({ success: true });
-    }, 300));
+    // Clean objects belonging to this building
+    const bldObjs = objectStore.getByBuilding(id);
+    bldObjs.forEach(o => objectStore.delete(o.id));
+
+    return { success: true };
   },
 
   // === FLOOR ===
+  getFloorsByCampus: async (campusId: string): Promise<{ success: boolean; data: Floor[] }> => {
+    const result = floors.filter(f => f.campusId === campusId).sort((a, b) => a.level - b.level);
+    return { success: true, data: result };
+  },
+
   getFloorsByBuilding: async (buildingId: string): Promise<{ success: boolean; data: Floor[] }> => {
-    return new Promise(resolve => setTimeout(() => {
-      resolve({ success: true, data: floors.filter(f => f.buildingId === buildingId).sort((a, b) => a.level - b.level) });
-    }, 200));
+    const result = floors.filter(f => f.buildingId === buildingId).sort((a, b) => a.level - b.level);
+    return { success: true, data: result };
   },
 
   getFloorById: async (id: string): Promise<{ success: boolean; data?: Floor; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const flr = floors.find(f => f.id === id);
-      if (flr) resolve({ success: true, data: flr });
-      else resolve({ success: false, message: 'Floor not found' });
-    }, 200));
+    const flr = floors.find(f => f.id === id);
+    if (flr) return { success: true, data: { ...flr } };
+    return { success: false, message: 'Floor not found' };
   },
 
   createFloor: async (data: Partial<Floor>): Promise<{ success: boolean; data?: Floor; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      if (!data.campusId || !data.buildingId) return resolve({ success: false, message: 'campusId and buildingId required' });
-      const newFloor: Floor = {
-        id: uuidv4(),
-        buildingId: data.buildingId,
-        campusId: data.campusId,
-        level: data.level ?? 0,
-        code: data.code || 'FL',
-        name: data.name || { en: 'New Floor' },
-        dimensions: data.dimensions || { widthMeters: 100, heightMeters: 100 },
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+    if (!data.campusId || !data.buildingId) {
+      return { success: false, message: 'campusId and buildingId required' };
+    }
+    const now = new Date().toISOString();
+    const newFloor: Floor = {
+      id: data.id || uuidv4(),
+      buildingId: data.buildingId,
+      campusId: data.campusId,
+      level: data.level ?? 0,
+      code: data.code || `FL-${data.level ?? 0}`,
+      name: data.name || { en: `Floor ${data.level ?? 0}` },
+      planImageUrl: data.planImageUrl,
+      svgContent: data.svgContent,
+      dimensions: data.dimensions || { widthMeters: 100, heightMeters: 100 },
+      overlayConfig: data.overlayConfig || {
+        opacity: 0.8,
+        rotationDegrees: 0,
+        scaleX: 1,
+        scaleY: 1,
+        offsetX: 0,
+        offsetY: 0,
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    floors = [...floors, newFloor];
+    save(LS_FLOORS, floors);
+    return { success: true, data: newFloor };
+  },
+
+  updateFloor: async (id: string, data: Partial<Floor>): Promise<{ success: boolean; data?: Floor; message?: string }> => {
+    const idx = floors.findIndex(f => f.id === id);
+    if (idx === -1) return { success: false, message: 'Not found' };
+
+    const updated: Floor = {
+      ...floors[idx],
+      ...data,
+      updatedAt: new Date().toISOString(),
+    };
+    floors = floors.map((f, i) => i === idx ? updated : f);
+    save(LS_FLOORS, floors);
+    return { success: true, data: updated };
+  },
+
+  duplicateFloor: async (
+    sourceFloorId: string,
+    newLevel: number,
+    newName?: LocalizedString,
+    duplicateObjects = false
+  ): Promise<{ success: boolean; data?: Floor; message?: string }> => {
+    const sourceRes = await campusService.getFloorById(sourceFloorId);
+    if (!sourceRes.success || !sourceRes.data) {
+      return { success: false, message: 'Source floor not found' };
+    }
+    const source = sourceRes.data;
+
+    // Check for level conflict within the same building
+    const existingSameLevel = floors.find(f => f.buildingId === source.buildingId && f.level === newLevel);
+    if (existingSameLevel) {
+      return { success: false, message: `Floor with level ${newLevel} already exists in this building.` };
+    }
+
+    const createdFloorRes = await campusService.createFloor({
+      buildingId: source.buildingId,
+      campusId: source.campusId,
+      level: newLevel,
+      code: `FL-${newLevel}`,
+      name: newName || { en: `Floor ${newLevel} (Copy of Level ${source.level})` },
+      dimensions: { ...source.dimensions },
+      planImageUrl: source.planImageUrl,
+      svgContent: source.svgContent,
+      overlayConfig: source.overlayConfig ? { ...source.overlayConfig } : undefined,
+    });
+
+    if (!createdFloorRes.success || !createdFloorRes.data) {
+      return createdFloorRes;
+    }
+
+    const newFloor = createdFloorRes.data;
+
+    // Duplicate objects if requested
+    if (duplicateObjects) {
+      const sourceObjects = objectStore.getByFloor(sourceFloorId);
+      for (const obj of sourceObjects) {
+        objectStore.create({
+          ...obj,
+          id: uuidv4(),
+          floorId: newFloor.id,
+          code: `${obj.code}-L${newLevel}`,
+          name: typeof obj.name === 'string'
+            ? { en: `${obj.name} (L${newLevel})` }
+            : { ...obj.name, en: `${obj.name?.en || 'Room'} (L${newLevel})` },
+        });
+      }
+    }
+
+    return { success: true, data: newFloor };
+  },
+
+  canDeleteFloor: async (id: string): Promise<DeletionSafetyReport> => {
+    const relatedObjects = objectStore.getByFloor(id);
+    const relatedNodes = navStore.getNodesByFloor(id);
+    const relatedConns = navStore.getConnectionsByFloor(id);
+
+    const issues: string[] = [];
+    if (relatedObjects.length > 0) {
+      issues.push(`Floor contains ${relatedObjects.length} object(s).`);
+    }
+    if (relatedNodes.length > 0 || relatedConns.length > 0) {
+      issues.push(`Floor has ${relatedNodes.length} navigation node(s) and ${relatedConns.length} connection(s).`);
+    }
+
+    return {
+      canDelete: issues.length === 0,
+      issues,
+      stats: {
+        objectsCount: relatedObjects.length,
+        nodesCount: relatedNodes.length,
+        connectionsCount: relatedConns.length,
+      },
+    };
+  },
+
+  deleteFloor: async (id: string, force = false): Promise<{ success: boolean; message?: string }> => {
+    const safety = await campusService.canDeleteFloor(id);
+    if (!safety.canDelete && !force) {
+      return {
+        success: false,
+        message: `Cannot delete floor safely: ${safety.issues.join(' ')} Use force=true to cascade delete.`,
       };
-      floors = [...floors, newFloor];
-      save(LS_FLOORS, floors);
-      resolve({ success: true, data: newFloor });
-    }, 300));
+    }
+
+    floors = floors.filter(f => f.id !== id);
+    save(LS_FLOORS, floors);
+
+    // Clean objects and nodes on this floor
+    objectStore.deleteByFloor(id);
+    const floorNodes = navStore.getNodesByFloor(id);
+    floorNodes.forEach(n => navStore.deleteNode(n.id));
+
+    const floorConns = navStore.getConnectionsByFloor(id);
+    floorConns.forEach(c => navStore.deleteConnection(c.id));
+
+    return { success: true };
   },
 
-  updateFloor: async (id: string, data: Partial<Floor>): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      const idx = floors.findIndex(f => f.id === id);
-      if (idx === -1) { resolve({ success: false, message: 'Not found' }); return; }
-      floors = floors.map((f, i) => i === idx ? { ...f, ...data, updatedAt: new Date().toISOString() } : f);
-      save(LS_FLOORS, floors);
-      resolve({ success: true });
-    }, 300));
-  },
-
-  deleteFloor: async (id: string): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => setTimeout(() => {
-      floors = floors.filter(f => f.id !== id);
-      save(LS_FLOORS, floors);
-      resolve({ success: true });
-    }, 300));
+  reset(newCampuses?: Campus[], newBuildings?: Building[], newFloors?: Floor[]): void {
+    campuses = newCampuses ? [...newCampuses] : [...INITIAL_CAMPUSES];
+    buildings = newBuildings ? [...newBuildings] : [...INITIAL_BUILDINGS];
+    floors = newFloors ? [...newFloors] : [...INITIAL_FLOORS];
+    save(LS_CAMPUSES, campuses);
+    save(LS_BUILDINGS, buildings);
+    save(LS_FLOORS, floors);
   },
 };

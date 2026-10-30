@@ -20,6 +20,7 @@ export interface CampusBundleMetadata {
 /** Every exportable entity carries its own campusId for cross-reference validation */
 export interface ExportedCampus {
   id: string;
+  organizationId?: string;
   slug: string;
   code: string;
   name: Record<string, string>;
@@ -77,7 +78,11 @@ export interface ExportedObject {
   category: string;
   coordinates: { x: number; y: number };
   associatedNodeId: string;
+  entranceNodeIds?: string[];
   isAccessible: boolean;
+  parentObjectId?: string;
+  subZoneType?: string;
+  status?: string;
   tags?: string[];
   images?: string[];
   historicalInfo?: Record<string, string>;
@@ -88,6 +93,8 @@ export interface ExportedObject {
     personName?: string;
   };
   externalLinks?: { title: string; url: string }[];
+  accessSchedule?: any;
+  properties?: Record<string, unknown>;
   attributes?: Record<string, any>;
   createdAt: string;
   updatedAt: string;
@@ -138,6 +145,7 @@ export interface CampusBundle {
   objects: ExportedObject[];
   nodes: ExportedNode[];
   connections: ExportedConnection[];
+  accessRules?: any[];
 }
 
 // ─── Validation Result ────────────────────────────────────────────────────────

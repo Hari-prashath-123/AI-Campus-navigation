@@ -21,37 +21,55 @@ type Listener = () => void;
 const listeners = new Set<Listener>();
 function notify() { listeners.forEach(fn => fn()); }
 
+export interface ObjectDeletionSafetyReport {
+  canDelete: boolean;
+  issues: string[];
+  childZonesCount: number;
+}
+
 export const objectStore = {
   subscribe(fn: Listener): () => void {
     listeners.add(fn);
     return () => listeners.delete(fn);
   },
 
-  getAll(): MapObject[] { return objects; },
+  getAll(includeArchived = false): MapObject[] {
+    if (includeArchived) return [...objects];
+    return objects.filter(o => !o.isArchived && o.status !== 'archived');
+  },
 
-  getByCampus(campusId: string): MapObject[] {
-    return objects.filter(o => o.campusId === campusId);
+  getByCampus(campusId: string, includeArchived = false): MapObject[] {
+    return objects.filter(o => o.campusId === campusId && (includeArchived || (!o.isArchived && o.status !== 'archived')));
   },
-  getByBuilding(buildingId: string): MapObject[] {
-    return objects.filter(o => o.buildingId === buildingId);
+
+  getByBuilding(buildingId: string, includeArchived = false): MapObject[] {
+    return objects.filter(o => o.buildingId === buildingId && (includeArchived || (!o.isArchived && o.status !== 'archived')));
   },
-  getByFloor(floorId: string): MapObject[] {
-    return objects.filter(o => o.floorId === floorId);
+
+  getByFloor(floorId: string, includeArchived = false): MapObject[] {
+    return objects.filter(o => o.floorId === floorId && (includeArchived || (!o.isArchived && o.status !== 'archived')));
   },
+
   getById(id: string): MapObject | undefined {
     return objects.find(o => o.id === id);
   },
 
-  search(campusId: string, query: string): MapObject[] {
+  getChildZones(parentObjectId: string, includeArchived = false): MapObject[] {
+    return objects.filter(o => o.parentObjectId === parentObjectId && (includeArchived || (!o.isArchived && o.status !== 'archived')));
+  },
+
+  search(campusId: string, query: string, includeArchived = false): MapObject[] {
     const q = query.toLowerCase().trim();
     return objects.filter(o => {
       if (o.campusId !== campusId) return false;
+      if (!includeArchived && (o.isArchived || o.status === 'archived')) return false;
       if (!q) return true;
       const name = typeof o.name === 'string' ? o.name : (o.name as any).en || '';
       return (
         name.toLowerCase().includes(q) ||
         o.code?.toLowerCase().includes(q) ||
-        o.category?.toLowerCase().includes(q)
+        o.category?.toLowerCase().includes(q) ||
+        o.subZoneType?.toLowerCase().includes(q)
       );
     });
   },
@@ -59,22 +77,29 @@ export const objectStore = {
   create(data: Partial<MapObject>): MapObject {
     const now = new Date().toISOString();
     const obj: MapObject = {
-      id: uuidv4(),
+      id: data.id || uuidv4(),
       campusId: data.campusId || '',
       buildingId: data.buildingId || '',
       floorId: data.floorId || '',
       code: data.code || `OBJ-${Math.floor(Math.random() * 9000 + 1000)}`,
       name: data.name || { en: 'New Object' },
+      description: data.description,
       category: data.category || 'room',
+      status: data.status || 'active',
+      isArchived: data.isArchived ?? false,
+      parentObjectId: data.parentObjectId,
+      subZoneType: data.subZoneType,
+      accessSchedule: data.accessSchedule,
       coordinates: data.coordinates || { x: 0, y: 0 },
       associatedNodeId: data.associatedNodeId || '',
+      entranceNodeIds: data.entranceNodeIds || (data.associatedNodeId ? [data.associatedNodeId] : []),
       isAccessible: data.isAccessible ?? true,
       tags: data.tags || [],
+      properties: data.properties || {},
       attributes: data.attributes || {},
       objectTypeId: data.objectTypeId,
       geometry: data.geometry,
       geometryType: data.geometryType,
-      entranceNodeIds: data.entranceNodeIds || [],
       createdAt: now,
       updatedAt: now,
     };
@@ -82,6 +107,26 @@ export const objectStore = {
     save(LS_OBJECTS, objects);
     notify();
     return obj;
+  },
+
+  createChildZone(parentObjectId: string, zoneData: Partial<MapObject>): MapObject {
+    const parent = this.getById(parentObjectId);
+    if (!parent) {
+      throw new Error(`Parent object ${parentObjectId} not found.`);
+    }
+
+    return this.create({
+      ...zoneData,
+      campusId: parent.campusId,
+      buildingId: parent.buildingId,
+      floorId: parent.floorId,
+      parentObjectId,
+      category: zoneData.category || 'room',
+      subZoneType: zoneData.subZoneType || 'workstation',
+      coordinates: zoneData.coordinates || { ...parent.coordinates },
+      associatedNodeId: zoneData.associatedNodeId || parent.associatedNodeId,
+      entranceNodeIds: zoneData.entranceNodeIds || parent.entranceNodeIds,
+    });
   },
 
   update(id: string, patch: Partial<MapObject>): MapObject | null {
@@ -94,8 +139,80 @@ export const objectStore = {
     return updated;
   },
 
-  delete(id: string): boolean {
-    if (!objects.some(o => o.id === id)) return false;
+  duplicate(id: string, overrides: Partial<MapObject> = {}): MapObject {
+    const original = this.getById(id);
+    if (!original) {
+      throw new Error(`Cannot duplicate: Object ${id} not found.`);
+    }
+
+    const codeBase = original.code || 'OBJ';
+    const newCode = overrides.code || `${codeBase}-COPY`;
+    const newName = overrides.name || (
+      typeof original.name === 'string'
+        ? { en: `${original.name} (Copy)` }
+        : { ...original.name, en: `${original.name?.en || 'Room'} (Copy)` }
+    );
+
+    const duplicated = this.create({
+      ...original,
+      id: uuidv4(),
+      code: newCode,
+      name: newName,
+      coordinates: overrides.coordinates || {
+        x: Math.round(original.coordinates.x + 2),
+        y: Math.round(original.coordinates.y + 2),
+      },
+      status: 'active',
+      isArchived: false,
+      ...overrides,
+    });
+
+    return duplicated;
+  },
+
+  archive(id: string): MapObject | null {
+    return this.update(id, {
+      status: 'archived',
+      isArchived: true,
+    });
+  },
+
+  unarchive(id: string): MapObject | null {
+    return this.update(id, {
+      status: 'active',
+      isArchived: false,
+    });
+  },
+
+  canDelete(id: string): ObjectDeletionSafetyReport {
+    const childZones = objects.filter(o => o.parentObjectId === id);
+    const issues: string[] = [];
+
+    if (childZones.length > 0) {
+      issues.push(`Object has ${childZones.length} internal child zone(s) / workstation(s) linked to it.`);
+    }
+
+    return {
+      canDelete: issues.length === 0,
+      issues,
+      childZonesCount: childZones.length,
+    };
+  },
+
+  delete(id: string, force = false): boolean {
+    const obj = objects.find(o => o.id === id);
+    if (!obj) return false;
+
+    const safety = this.canDelete(id);
+    if (!safety.canDelete && !force) {
+      return false;
+    }
+
+    // If force, also clean or detach child zones
+    if (force && safety.childZonesCount > 0) {
+      objects = objects.filter(o => o.parentObjectId !== id);
+    }
+
     objects = objects.filter(o => o.id !== id);
     save(LS_OBJECTS, objects);
     notify();
@@ -108,8 +225,8 @@ export const objectStore = {
     notify();
   },
 
-  reset(): void {
-    objects = [...INITIAL_MAP_OBJECTS];
+  reset(newObjects?: MapObject[]): void {
+    objects = newObjects ? [...newObjects] : [...INITIAL_MAP_OBJECTS];
     save(LS_OBJECTS, objects);
     notify();
   },

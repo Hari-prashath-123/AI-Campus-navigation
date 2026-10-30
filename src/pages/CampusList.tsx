@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Plus, Search, Map as MapIcon, Building2, ArrowRight } from 'lucide-react';
 import { campusService } from '../api/campus.service';
+import { organizationService } from '../api/organization.service';
 import { Campus } from '../types';
+import { Organization } from '../types/organization';
 import { Button } from '../components/ui/Button';
 import { LoadingState } from '../components/ui/LoadingState';
 import { ErrorState } from '../components/ui/ErrorState';
@@ -11,25 +13,39 @@ import { Modal } from '../components/ui/Modal';
 import { Input } from '../components/ui/Input';
 
 export const CampusList: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const orgFilter = searchParams.get('org') || '';
+
   const [campuses, setCampuses] = useState<Campus[]>([]);
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   
   const [isCreating, setIsCreating] = useState(false);
   const [newCampusName, setNewCampusName] = useState('');
+  const [newCampusCode, setNewCampusCode] = useState('');
+  const [newCampusSlug, setNewCampusSlug] = useState('');
+  const [newCampusDesc, setNewCampusDesc] = useState('');
+  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
   const [saving, setSaving] = useState(false);
 
   const navigate = useNavigate();
 
   useEffect(() => {
-    loadCampuses();
+    organizationService.getOrganizations().then(res => {
+      if (res.success) setOrganizations(res.data);
+    });
   }, []);
+
+  useEffect(() => {
+    loadCampuses();
+  }, [orgFilter]);
 
   const loadCampuses = async () => {
     try {
       setLoading(true);
-      const res = await campusService.getCampuses();
+      const res = await campusService.getCampuses(orgFilter || undefined);
       if (res.success) setCampuses(res.data);
       else setError('Failed to load campuses.');
     } catch (err: any) {
@@ -39,11 +55,19 @@ export const CampusList: React.FC = () => {
     }
   };
 
+  const toSlug = (s: string) => s.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
   const handleCreate = async () => {
     if (!newCampusName.trim()) return;
     try {
       setSaving(true);
-      const res = await campusService.createCampus({ name: { en: newCampusName } });
+      const res = await campusService.createCampus({
+        organizationId: selectedOrgId || orgFilter || (organizations[0]?.id) || undefined,
+        name: { en: newCampusName },
+        code: newCampusCode.trim() || undefined,
+        slug: newCampusSlug.trim() || toSlug(newCampusName),
+        description: newCampusDesc.trim() ? { en: newCampusDesc } : undefined,
+      });
       if (res.success && res.data) {
         setIsCreating(false);
         navigate(`/admin/campuses/${res.data.id}`);
@@ -85,6 +109,22 @@ export const CampusList: React.FC = () => {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+          {organizations.length > 0 && (
+            <select
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={orgFilter}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val) setSearchParams({ org: val });
+                else setSearchParams({});
+              }}
+            >
+              <option value="">All Organizations</option>
+              {organizations.map(o => (
+                <option key={o.id} value={o.id}>{o.name.en || o.slug}</option>
+              ))}
+            </select>
+          )}
         </div>
       </div>
 
@@ -132,13 +172,52 @@ export const CampusList: React.FC = () => {
 
       <Modal isOpen={isCreating} onClose={() => setIsCreating(false)} title="Create New Campus">
         <div className="space-y-4">
+          {organizations.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Organization</label>
+              <select
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                value={selectedOrgId || orgFilter || organizations[0]?.id || ''}
+                onChange={e => setSelectedOrgId(e.target.value)}
+              >
+                {organizations.map(o => (
+                  <option key={o.id} value={o.id}>{o.name.en || o.slug}</option>
+                ))}
+              </select>
+            </div>
+          )}
           <Input 
             label="Campus Name (English)" 
             placeholder="e.g. Main City Campus" 
             value={newCampusName}
-            onChange={e => setNewCampusName(e.target.value)}
+            onChange={e => { setNewCampusName(e.target.value); setNewCampusSlug(e.target.value.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')); }}
             autoFocus
           />
+          <div className="grid grid-cols-2 gap-3">
+            <Input 
+              label="Short Code" 
+              placeholder="e.g. MCC" 
+              value={newCampusCode}
+              onChange={e => setNewCampusCode(e.target.value.toUpperCase())}
+              helperText="3–6 uppercase letters"
+            />
+            <Input 
+              label="URL Slug" 
+              placeholder="e.g. main-city-campus" 
+              value={newCampusSlug}
+              onChange={e => setNewCampusSlug(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Description (optional)</label>
+            <textarea
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              rows={2}
+              placeholder="Brief description of this campus"
+              value={newCampusDesc}
+              onChange={e => setNewCampusDesc(e.target.value)}
+            />
+          </div>
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={() => setIsCreating(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} isLoading={saving} disabled={!newCampusName.trim()}>Create Campus</Button>

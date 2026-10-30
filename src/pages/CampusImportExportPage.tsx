@@ -55,6 +55,7 @@ export const CampusImportExportPage: React.FC = () => {
   const [parsedBundle, setParsedBundle] = useState<CampusBundle | null>(null);
   const [importing, setImporting] = useState(false);
   const [importDone, setImportDone] = useState(false);
+  const [importedCampusId, setImportedCampusId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -91,15 +92,17 @@ export const CampusImportExportPage: React.FC = () => {
     setImporting(true);
     setImportError(null);
     try {
-      // Apply migration if needed
-      const migrated = campusImportExportService.migrate(parsedBundle);
-      // In a real app, this would call an importCampus(bundle) API call.
-      // Here we log and simulate success.
-      console.log('Importing campus bundle:', migrated);
-      await new Promise(r => setTimeout(r, 1000)); // Simulate network delay
-      setImportDone(true);
+      const res = await campusImportExportService.importCampus(parsedBundle, {
+        importMode: 'create_new_site',
+      });
+      if (res.success) {
+        setImportDone(true);
+        setImportedCampusId(res.campusId);
+      } else {
+        setImportError(res.message || 'Import failed.');
+      }
     } catch (err: any) {
-      setImportError(err.message);
+      setImportError(err.message || 'Import encountered an error.');
     } finally {
       setImporting(false);
     }
@@ -252,9 +255,22 @@ export const CampusImportExportPage: React.FC = () => {
 
                 {/* Import success */}
                 {importDone && (
-                  <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-3">
-                    <CheckCircle2 size={18} className="text-emerald-600" />
-                    <p className="text-sm font-semibold text-emerald-800">Campus imported successfully!</p>
+                  <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <CheckCircle2 size={18} className="text-emerald-600 shrink-0" />
+                      <div>
+                        <p className="text-sm font-semibold text-emerald-800">Campus imported successfully with full data isolation!</p>
+                        <p className="text-xs text-emerald-600 mt-0.5">All buildings, floors, objects, and navigation nodes were created as an independent site.</p>
+                      </div>
+                    </div>
+                    {importedCampusId && (
+                      <Link
+                        to={`/admin/campuses/${importedCampusId}`}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shrink-0 transition-colors"
+                      >
+                        Open Imported Site →
+                      </Link>
+                    )}
                   </div>
                 )}
 

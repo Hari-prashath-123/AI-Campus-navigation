@@ -20,6 +20,24 @@ export interface MapObject {
   /** Object type template reference (links to ObjectType.id) */
   objectTypeId?: string;
 
+  /** Lifecycle status of object */
+  status?: 'draft' | 'active' | 'inactive' | 'archived' | 'under_maintenance' | 'demolished';
+  isArchived?: boolean;
+
+  /** Internal sub-zone hierarchy: reference to enclosing parent room/object */
+  parentObjectId?: string;
+  subZoneType?: 'workstation' | 'staff_area' | 'cabin' | 'equipment_zone' | 'storage_bay' | 'restricted_zone' | string;
+
+  /** Configurable access schedule & temporary closure info */
+  accessSchedule?: {
+    openTime?: string; // HH:MM
+    closeTime?: string; // HH:MM
+    activeDays?: number[]; // 0=Sunday..6=Saturday
+    isRestricted?: boolean;
+    allowedRoles?: string[];
+    closureReason?: string;
+  };
+
   /** Type-specific property values validated against ObjectType.propertyDefinitions */
   properties?: Record<string, unknown>;
 
@@ -73,5 +91,17 @@ export interface CreateMapObjectInput {
   associatedNodeId: string;
   entranceNodeIds?: string[];
   isAccessible?: boolean;
+  status?: 'draft' | 'active' | 'inactive' | 'archived' | 'under_maintenance' | 'demolished';
+  isArchived?: boolean;
+  parentObjectId?: string;
+  subZoneType?: 'workstation' | 'staff_area' | 'cabin' | 'equipment_zone' | 'storage_bay' | 'restricted_zone' | string;
+  accessSchedule?: {
+    openTime?: string;
+    closeTime?: string;
+    activeDays?: number[];
+    isRestricted?: boolean;
+    allowedRoles?: string[];
+    closureReason?: string;
+  };
   attributes?: Record<string, any>;
 }

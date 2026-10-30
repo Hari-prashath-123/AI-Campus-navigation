@@ -9,7 +9,7 @@ import { LoadingState } from '../components/ui/LoadingState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Modal } from '../components/ui/Modal';
-import { Map, Building2, Plus, Edit2, Network, FileJson, Trash2, Copy } from 'lucide-react';
+import { Map, Building2, Plus, Edit2, Network, FileJson, Trash2, Copy, ShieldAlert as ShieldAlertIcon } from 'lucide-react';
 
 export const CampusDetail: React.FC = () => {
   const { campusId } = useParams<{ campusId: string }>();
@@ -22,6 +22,9 @@ export const CampusDetail: React.FC = () => {
 
   const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
   const [newBuildingName, setNewBuildingName] = useState('');
+  const [newBuildingCode, setNewBuildingCode] = useState('');
+  const [newBuildingDesc, setNewBuildingDesc] = useState('');
+  const [newBuildingFloors, setNewBuildingFloors] = useState(1);
   const [saving, setSaving] = useState(false);
   const [hasMapData, setHasMapData] = useState(true);
   
@@ -75,11 +78,17 @@ export const CampusDetail: React.FC = () => {
       setSaving(true);
       const res = await campusService.createBuilding({ 
         campusId: campus.id, 
-        name: { en: newBuildingName } 
+        name: { en: newBuildingName },
+        code: newBuildingCode.trim() || undefined,
+        description: newBuildingDesc.trim() ? { en: newBuildingDesc } : undefined,
+        totalFloors: newBuildingFloors,
       });
       if (res.success && res.data) {
         setIsCreatingBuilding(false);
         setNewBuildingName('');
+        setNewBuildingCode('');
+        setNewBuildingDesc('');
+        setNewBuildingFloors(1);
         navigate(`/admin/campuses/${campus.id}/buildings/${res.data.id}`, { state: { promptPlacement: true } });
       }
     } finally {
@@ -91,7 +100,7 @@ export const CampusDetail: React.FC = () => {
     if (!deleteConfirm) return;
     try {
       setSaving(true);
-      await campusService.deleteBuilding(deleteConfirm.id);
+      await campusService.deleteBuilding(deleteConfirm.id, true);
       setDeleteConfirm(null);
       if (campusId) loadData(campusId);
     } finally {
@@ -143,6 +152,9 @@ export const CampusDetail: React.FC = () => {
             <div className="flex gap-2">
               <Link to={`/admin/campuses/${campus.id}/connections`}>
                 <Button variant="outline" icon={<Network size={18} />}>Routing &amp; Connections</Button>
+              </Link>
+              <Link to={`/admin/campuses/${campus.id}/access`}>
+                <Button variant="outline" icon={<ShieldAlertIcon size={18} />}>Access Control</Button>
               </Link>
               <Link to={`/admin/campuses/${campus.id}/map`}>
                 <Button variant="outline" icon={<Map size={18} />}>Campus Map</Button>
@@ -250,6 +262,31 @@ export const CampusDetail: React.FC = () => {
             onChange={e => setNewBuildingName(e.target.value)}
             autoFocus
           />
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Code (optional)"
+              placeholder="e.g. SCI-A"
+              value={newBuildingCode}
+              onChange={e => setNewBuildingCode(e.target.value.toUpperCase())}
+            />
+            <Input
+              label="Total Floors"
+              type="number"
+              value={newBuildingFloors}
+              onChange={e => setNewBuildingFloors(parseInt(e.target.value) || 1)}
+              helperText="Including ground floor"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Description (optional)</label>
+            <textarea
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              rows={2}
+              placeholder="What does this building contain?"
+              value={newBuildingDesc}
+              onChange={e => setNewBuildingDesc(e.target.value)}
+            />
+          </div>
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={() => setIsCreatingBuilding(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateBuilding} isLoading={saving} disabled={!newBuildingName.trim()}>Create Building</Button>

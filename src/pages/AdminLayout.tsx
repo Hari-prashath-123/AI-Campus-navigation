@@ -1,16 +1,17 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Map, Settings, Users, LibraryBig, Type, Building2, ChevronRight, Bot, ChevronLeft, Menu } from 'lucide-react';
+import { LayoutDashboard, Map, Settings, Users, LibraryBig, Type, Building2, ChevronRight, Bot, ChevronLeft, Menu, Network } from 'lucide-react';
 import React, { useState } from 'react';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/admin/dashboard' },
-  { icon: Building2, label: 'Campuses', path: '/admin/campuses' },
-  { icon: Map, label: 'Map Editor', path: '/admin/map' },
-  { icon: Type, label: 'Object Types', path: '/admin/object-types' },
-  { icon: Bot, label: 'AI Assistant', path: '/admin/ai-assistant' },
-  { icon: LibraryBig, label: 'Assets', path: '/admin/assets' },
-  { icon: Users, label: 'Access Control', path: '/admin/access' },
-  { icon: Settings, label: 'Settings', path: '/admin/settings' },
+  { icon: Network,         label: 'Organizations', path: '/admin/organizations' },
+  { icon: Building2,       label: 'Campuses', path: '/admin/campuses' },
+  { icon: Map,             label: 'Map Editor', path: '/admin/map' },
+  { icon: Type,            label: 'Object Types', path: '/admin/object-types' },
+  { icon: Users,           label: 'Access Control', path: '/admin/access' },
+  { icon: Bot,             label: 'AI Assistant', path: '/admin/ai-assistant' },
+  { icon: LibraryBig,      label: 'Assets', path: '/admin/assets' },
+  { icon: Settings,        label: 'Settings', path: '/admin/settings' },
 ];
 
 export const AdminLayout: React.FC = () => {

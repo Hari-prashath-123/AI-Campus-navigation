@@ -8,6 +8,7 @@ import { useHistory } from '../../hooks/useHistory';
 import { useNavStore } from '../../hooks/useNavStore';
 import { useObjectStore } from '../../hooks/useObjectStore';
 import { campusService } from '../../api/campus.service';
+import { navStore } from '../../api/nav.store';
 import { CanvasStage } from './CanvasStage';
 import { EditorSidebar } from './EditorSidebar';
 import { ObjectPalette } from './ObjectPalette';
@@ -18,6 +19,7 @@ import { ValidationPanel } from './ValidationPanel';
 import { FloorConnectorModal } from './FloorConnectorModal';
 import { MapImportExportModal } from './MapImportExportModal';
 import { validateCampusGraph } from '../../utils/graph-validation';
+import { CampusGraphGenerator } from '../../api/graph-generator.service';
 import { ObjectType } from '../../types';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -25,7 +27,7 @@ import {
   Undo2, Redo2, Trash2, Grid3X3,
   ZoomIn, ZoomOut, Eye, Save, ChevronRight, Layers,
   ShieldCheck, Maximize2, Download,
-  Landmark, Building2
+  Landmark, Building2, HelpCircle, Keyboard, X, Sparkles
 } from 'lucide-react';
 
 interface MapEditorProps {
@@ -149,6 +151,9 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   const [selectedEdge, setSelectedEdge] = useState<CampusConnection | null>(null);
   const [nodeTypeToCreate, setNodeTypeToCreate] = useState<SpatialNodeType>('hallway');
 
+  // Right sidebar open/closed (React-controlled, replaces DOM classList hack)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
   // Layer visibility
   const [layers, setLayers] = useState<LayerVisibility>({
     floorplanImage: true,
@@ -162,6 +167,16 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   const [isValidationPanelOpen, setIsValidationPanelOpen] = useState(false);
   const [isFloorConnectorModalOpen, setIsFloorConnectorModalOpen] = useState(false);
   const [isImportExportModalOpen, setIsImportExportModalOpen] = useState(false);
+  // Keyboard shortcut help overlay
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
+
+  // Open floor connector modal when connect_floors tool is selected
+  useEffect(() => {
+    if (tool === 'connect_floors') {
+      setIsFloorConnectorModalOpen(true);
+      setTool('select');
+    }
+  }, [tool]);
 
   // Snapping & Measurement & Fit-to-View
   const [isSnapping, setIsSnapping] = useState(true);
@@ -188,6 +203,8 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevShapeCount = useRef(0);
   const [pendingDelete, setPendingDelete] = useState(false);
+  // Stable JSON snapshot of shapes for change detection (not just count)
+  const prevShapesHash = useRef<string>('');
 
   // Load from local storage or hydrate from objectStore
   useEffect(() => {
@@ -198,6 +215,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
         const parsed = JSON.parse(data);
         setShapes(parsed);
         prevShapeCount.current = parsed.length;
+        prevShapesHash.current = JSON.stringify(parsed);
         setSaveStatus('saved');
         return;
       } catch (e) {
@@ -244,17 +262,24 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       });
       setShapes(hydratedShapes);
       prevShapeCount.current = hydratedShapes.length;
+      prevShapesHash.current = JSON.stringify(hydratedShapes);
     } else {
       setShapes([]);
       prevShapeCount.current = 0;
+      prevShapesHash.current = '[]';
     }
     setSaveStatus('saved');
   }, [getStorageKey, activeFloorId]);
 
-  // Mark unsaved when shapes change
+  // Mark unsaved when shapes change (hash-based, not just count)
   useEffect(() => {
-    if (shapes.length !== prevShapeCount.current) {
-      setSaveStatus('unsaved');
+    const hash = JSON.stringify(shapes);
+    if (hash !== prevShapesHash.current) {
+      // Only fire 'unsaved' after the initial load (hash will be '' then)
+      if (prevShapesHash.current !== '') {
+        setSaveStatus('unsaved');
+      }
+      prevShapesHash.current = hash;
       prevShapeCount.current = shapes.length;
     }
   }, [shapes]);
@@ -397,6 +422,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
           case '+': setZoom(z => Math.min(z + 10, 300)); break;
           case '-': setZoom(z => Math.max(z - 10, 25)); break;
           case '0': setZoom(100); break;
+          case '?': setShowShortcutHelp(h => !h); e.preventDefault(); break;
         }
       }
     };
@@ -408,6 +434,59 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   const validationReport = useMemo(() => {
     return validateCampusGraph(floorNodes, campusConnections, floorObjects);
   }, [floorNodes, campusConnections, floorObjects]);
+
+  // Automated & Incremental Navigation Graph Generator
+  const handleGenerateGraph = useCallback(() => {
+    const allBuildingNodes = activeBuildingId ? navStore.getNodesByBuilding(activeBuildingId) : floorNodes;
+    const allCampusConnections = activeCampusId ? navStore.getConnectionsByCampus(activeCampusId) : campusConnections;
+
+    const res = CampusGraphGenerator.generateGraph(
+      activeCampusId,
+      activeFloorId,
+      activeBuildingId,
+      shapes,
+      allBuildingNodes,
+      allCampusConnections,
+      floorObjects,
+      calibration,
+      {
+        snapToleranceMeters: 0.8,
+        doorSnapToleranceMeters: 5.0,
+        preserveMetadata: true,
+        autoAssociateRooms: true,
+        autoConnectFloorTransitions: true,
+      }
+    );
+
+    // Update navStore atomically
+    navStore.setNodesAndConnections(res.nodes, res.connections);
+
+    // Update objectStore for any newly associated doors
+    res.updatedObjects.forEach(obj => {
+      updateObject(obj.id, {
+        associatedNodeId: obj.associatedNodeId,
+        entranceNodeIds: obj.entranceNodeIds,
+      });
+    });
+
+    // Update shapes with door associations if matched
+    setShapes(prev => prev.map(s => {
+      const updatedObj = res.updatedObjects.find(uo => uo.id === s.objectId);
+      if (updatedObj) {
+        return {
+          ...s,
+          attributes: {
+            ...(s.attributes || {}),
+            associatedNodeId: updatedObj.associatedNodeId,
+            entranceNodeIds: updatedObj.entranceNodeIds,
+          },
+        };
+      }
+      return s;
+    }));
+
+    setSaveStatus('unsaved');
+  }, [activeCampusId, activeFloorId, activeBuildingId, shapes, floorNodes, campusConnections, floorObjects, calibration, updateObject, setShapes]);
 
   // Duplicate selected shapes
   const handleDuplicate = useCallback(() => {
@@ -765,6 +844,16 @@ export const MapEditor: React.FC<MapEditorProps> = ({
             <span>Layers</span>
           </button>
 
+          {/* Auto-Generate / Sync Navigation Graph */}
+          <button
+            onClick={handleGenerateGraph}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 transition-all shadow-xs"
+            title="Auto-generate or sync navigation graph from drawn corridors, doors, and rooms"
+          >
+            <Sparkles size={13} className="text-indigo-600" />
+            <span>Sync Graph</span>
+          </button>
+
           {/* Validation Status Badge */}
           <button
             onClick={() => setIsValidationPanelOpen(!isValidationPanelOpen)}
@@ -821,6 +910,15 @@ export const MapEditor: React.FC<MapEditorProps> = ({
             <Settings2 size={15} />
           </button>
 
+          {/* Keyboard Shortcuts Help */}
+          <button
+            title="Keyboard Shortcuts (?)"
+            onClick={() => setShowShortcutHelp(true)}
+            className="p-1.5 bg-white border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 transition-all"
+          >
+            <HelpCircle size={15} />
+          </button>
+
           {/* Save Button with Unsaved Alert Badge */}
           <button
             onClick={performSave}
@@ -872,6 +970,13 @@ export const MapEditor: React.FC<MapEditorProps> = ({
             </div>
           )}
 
+          {tool === 'polygon' && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-blue-700 text-white text-xs font-medium px-4 py-1.5 rounded-full shadow-xl">
+              <span className="w-2 h-2 rounded-full bg-white animate-ping" />
+              <span>Click to place polygon vertices. Double-click, click start point, or press Enter to close. (Esc to cancel)</span>
+            </div>
+          )}
+
           {/* Preview overlay banner */}
           {showPreview && (
             <div className="absolute inset-0 z-20 pointer-events-none border-4 border-emerald-400">
@@ -899,6 +1004,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
             report={validationReport}
             isOpen={isValidationPanelOpen}
             onClose={() => setIsValidationPanelOpen(false)}
+            onRebuildGraph={handleGenerateGraph}
             onSelectEntity={(entityId, category) => {
               if (category === 'node') {
                 const node = floorNodes.find(n => n.id === entityId);
@@ -1033,56 +1139,60 @@ export const MapEditor: React.FC<MapEditorProps> = ({
             </div>
             
             <button 
-              onClick={() => document.getElementById('editor-sidebar')?.classList.toggle('hidden')}
+              onClick={() => setIsSidebarOpen(v => !v)}
               className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 transition-colors"
+              title="Toggle Properties Panel"
             >
-              Toggle Panel
+              {isSidebarOpen ? 'Hide Panel' : 'Show Panel'}
             </button>
           </div>
         </div>
 
         {/* RIGHT: Properties Sidebar */}
-        <div id="editor-sidebar" className="flex flex-col h-full z-10 shrink-0">
-          <EditorSidebar
-            selectedShapes={selectedShapes}
-            updateShape={updateShape}
-            onDuplicate={handleDuplicate}
-            onBulkDelete={() => setPendingDelete(true)}
-            onBulkAlign={handleBulkAlign}
-            calibration={calibration}
-            selectedNode={selectedNode}
-            selectedEdge={selectedEdge}
-            onUpdateNode={(id, patch) => {
-              updateNode(id, patch);
-              setSaveStatus('unsaved');
-            }}
-            onDeleteNode={(id) => {
-              deleteNode(id);
-              setSelectedNode(null);
-              setSaveStatus('unsaved');
-            }}
-            onUpdateEdge={(id, patch) => {
-              updateConnection(id, patch);
-              setSaveStatus('unsaved');
-            }}
-            onDeleteEdge={(id) => {
-              deleteConnection(id);
-              setSelectedEdge(null);
-              setSaveStatus('unsaved');
-            }}
-            availableNodes={floorNodes}
-            activeFloor={activeFloor}
-            activeBuilding={activeBuilding}
-            activeCampus={activeCampus}
-            onUpdateFloorOverlay={handleUpdateFloorOverlay}
-            onFitToView={triggerFitToView}
-            totalStats={{
-              shapesCount: shapes.length,
-              nodesCount: floorNodes.length,
-              edgesCount: campusConnections.length,
-            }}
-          />
-        </div>
+        {isSidebarOpen && (
+          <div className="flex flex-col h-full z-10 shrink-0">
+            <EditorSidebar
+              selectedShapes={selectedShapes}
+              updateShape={updateShape}
+              onDuplicate={handleDuplicate}
+              onBulkDelete={() => setPendingDelete(true)}
+              onBulkAlign={handleBulkAlign}
+              calibration={calibration}
+              selectedNode={selectedNode}
+              selectedEdge={selectedEdge}
+              onUpdateNode={(id, patch) => {
+                updateNode(id, patch);
+                setSaveStatus('unsaved');
+              }}
+              onDeleteNode={(id) => {
+                deleteNode(id);
+                setSelectedNode(null);
+                setSaveStatus('unsaved');
+              }}
+              onUpdateEdge={(id, patch) => {
+                updateConnection(id, patch);
+                setSaveStatus('unsaved');
+              }}
+              onDeleteEdge={(id) => {
+                deleteConnection(id);
+                setSelectedEdge(null);
+                setSaveStatus('unsaved');
+              }}
+              availableNodes={floorNodes}
+              activeFloor={activeFloor}
+              activeBuilding={activeBuilding}
+              activeCampus={activeCampus}
+              onUpdateFloorOverlay={handleUpdateFloorOverlay}
+              onFitToView={triggerFitToView}
+              totalStats={{
+                shapesCount: shapes.length,
+                nodesCount: floorNodes.length,
+                edgesCount: campusConnections.length,
+              }}
+              onClose={() => setIsSidebarOpen(false)}
+            />
+          </div>
+        )}
       </div>
 
       {/* ── DELETE CONFIRMATION MODAL ───────────────────────────────────── */}
@@ -1133,7 +1243,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
         campusId={activeCampusId}
         buildingId={activeBuildingId}
         floors={floors}
-        nodes={floorNodes}
+        nodes={activeBuildingId ? navStore.getNodesByBuilding(activeBuildingId) : floorNodes}
       />
 
       {/* Calibration Modal */}
@@ -1143,6 +1253,64 @@ export const MapEditor: React.FC<MapEditorProps> = ({
         calibration={calibration}
         onChange={setCalibration}
       />
+
+      {/* ── KEYBOARD SHORTCUTS HELP MODAL ────────────────────────────────── */}
+      {showShortcutHelp && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-lg w-full border border-slate-200">
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Keyboard size={18} className="text-blue-600" />
+                <h3 className="font-semibold text-slate-900 text-sm">Keyboard Shortcuts & Editor Controls</h3>
+              </div>
+              <button
+                onClick={() => setShowShortcutHelp(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded hover:bg-slate-100"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">Drawing Tools</span>
+                <div className="space-y-1">
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Select Mode</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">V</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Pan Tool</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">H</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Draw Rectangle</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">R</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Draw Polygon</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">P</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Draw Circle</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">C</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Draw Line / Wall</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">L</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Place POI Point</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">M</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Add Nav Node</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">N</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Connect Path</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">E</kbd></div>
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">Actions & Navigation</span>
+                <div className="space-y-1">
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Undo / Redo</span><span className="space-x-1"><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">Ctrl+Z</kbd><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">Ctrl+Y</kbd></span></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Duplicate</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">Ctrl+D</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Save Floor</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">Ctrl+S</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Delete Item</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">Del</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Fit to View</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">F</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Zoom In / Out</span><span className="space-x-1"><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">+</kbd><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">-</kbd></span></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Reset Zoom 100%</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">0</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Cancel / Deselect</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">Esc</kbd></div>
+                  <div className="flex justify-between py-0.5"><span className="text-slate-600">Temporary Pan</span><kbd className="px-1.5 py-0.5 bg-slate-100 rounded border text-slate-700 font-mono text-[10px]">Space</kbd></div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-5 pt-3 border-t border-slate-100 flex justify-end">
+              <button
+                onClick={() => setShowShortcutHelp(false)}
+                className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg text-xs"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

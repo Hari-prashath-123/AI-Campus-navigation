@@ -6,6 +6,23 @@ import {
 } from '../types';
 import { NotFoundError, ValidationError } from '../utils/errors';
 import { generateEntityId, isValidSlug } from '../utils/validation';
+import { objectStore } from './object.store';
+
+const LS_OBJECT_TYPES = 'omnicampus_object_types';
+
+function loadTypes(fallback: ObjectType[]): ObjectType[] {
+  try {
+    const raw = localStorage.getItem(LS_OBJECT_TYPES);
+    if (raw) return JSON.parse(raw) as ObjectType[];
+  } catch {}
+  return fallback;
+}
+
+function saveTypes(data: ObjectType[]) {
+  try {
+    localStorage.setItem(LS_OBJECT_TYPES, JSON.stringify(data));
+  } catch {}
+}
 
 // ─── Built-in system object types (seeded; cannot be deleted) ─────────────────
 
@@ -296,7 +313,7 @@ const SYSTEM_TYPES: ObjectType[] = [
  */
 export class ObjectTypeService {
   private static instance: ObjectTypeService;
-  private types: ObjectType[] = [...SYSTEM_TYPES];
+  private types: ObjectType[] = loadTypes([...SYSTEM_TYPES]);
 
   private constructor() {}
 
@@ -349,6 +366,7 @@ export class ObjectTypeService {
     };
 
     this.types.push(newType);
+    saveTypes(this.types);
     return apiClient.simulateNetwork({ ...newType });
   }
 
@@ -375,6 +393,7 @@ export class ObjectTypeService {
     };
 
     this.types[idx] = updated;
+    saveTypes(this.types);
     return apiClient.simulateNetwork({ ...updated });
   }
 
@@ -389,6 +408,7 @@ export class ObjectTypeService {
     };
 
     this.types[idx] = updated;
+    saveTypes(this.types);
     return apiClient.simulateNetwork({ ...updated });
   }
 
@@ -397,8 +417,38 @@ export class ObjectTypeService {
     if (!t) throw new NotFoundError('ObjectType', id);
     if (t.isSystem) throw new ValidationError('System object types cannot be deleted. They are required for core platform functionality.');
 
+    // Reference validation: check if active objects are using this object type
+    const referencingObjects = objectStore.getAll().filter(o => o.objectTypeId === id);
+    if (referencingObjects.length > 0) {
+      throw new ValidationError(
+        `Cannot delete object type "${t.name}": it is currently referenced by ${referencingObjects.length} object(s). Reassign or delete those objects before removing this type.`
+      );
+    }
+
     this.types = this.types.filter((x) => x.id !== id);
+    saveTypes(this.types);
     return apiClient.simulateNetwork(undefined);
+  }
+
+  /**
+   * Helper to compute default property values for an object type
+   */
+  public getDefaultProperties(typeIdOrSlug: string): Record<string, unknown> {
+    const t = this.types.find(x => x.id === typeIdOrSlug || x.slug === typeIdOrSlug);
+    if (!t) return {};
+
+    const defaults: Record<string, unknown> = {};
+    for (const prop of t.propertyDefinitions) {
+      if (prop.defaultValue !== undefined && prop.defaultValue !== null) {
+        defaults[prop.key] = prop.defaultValue;
+      }
+    }
+    return defaults;
+  }
+
+  public reset(): void {
+    this.types = [...SYSTEM_TYPES];
+    saveTypes(this.types);
   }
 
   // ─── Private Helpers ──────────────────────────────────────────────────────

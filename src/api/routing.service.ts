@@ -1,5 +1,6 @@
 import { SpatialNode, CampusConnection } from '../types/connection';
 import { MapObject } from '../types/object';
+import { accessRuleService } from './access-rule.service';
 
 export type RouteMode = 'walking' | 'vehicle';
 
@@ -7,6 +8,7 @@ export interface RoutePreferences {
   mode: RouteMode;
   accessibleOnly: boolean;
   blockedConnectionIds?: string[];
+  allowRestricted?: boolean;
 }
 
 export interface RouteTransition {
@@ -14,6 +16,19 @@ export interface RouteTransition {
   toNodeId: string;
   type: string;
   description: string;
+  fromFloorId?: string;
+  toFloorId?: string;
+}
+
+export interface RouteStep {
+  stepIndex: number;
+  instruction: string;
+  distanceMeters: number;
+  durationSeconds: number;
+  turnType: 'straight' | 'left' | 'right' | 'slight_left' | 'slight_right' | 'stairs' | 'elevator' | 'ramp' | 'bridge' | 'depart' | 'arrive';
+  floorId?: string;
+  buildingId?: string;
+  nodeId?: string;
 }
 
 export interface RouteResult {
@@ -25,6 +40,7 @@ export interface RouteResult {
   floors: string[];
   buildings: string[];
   transitions: RouteTransition[];
+  steps?: RouteStep[];
   message?: string;
 }
 
@@ -123,34 +139,55 @@ export class RoutingEngine {
       return { success: false, nodes: [], objects: [], totalDistanceMeters: 0, estimatedTimeSeconds: 0, floors: [], buildings: [], transitions: [], message: 'Source or target object not found.' };
     }
 
-    if (!sourceObj.associatedNodeId || !targetObj.associatedNodeId) {
-      return { success: false, nodes: [], objects: [], totalDistanceMeters: 0, estimatedTimeSeconds: 0, floors: [], buildings: [], transitions: [], message: 'Objects must have associated routing nodes.' };
+    if (!prefs.allowRestricted) {
+      const targetAccess = accessRuleService.isTargetAccessible('object', targetObjectId);
+      if (!targetAccess.isAccessible && targetAccess.isRoutingBlocked) {
+        return {
+          success: false,
+          nodes: [],
+          objects: [sourceObjectId, targetObjectId],
+          totalDistanceMeters: 0,
+          estimatedTimeSeconds: 0,
+          floors: [],
+          buildings: [],
+          transitions: [],
+          message: targetAccess.reason || 'Target object is currently closed or restricted.',
+        };
+      }
     }
 
-    const startNode = sourceObj.associatedNodeId;
-    const endNode = targetObj.associatedNodeId;
+    const sourceEntrances = Array.from(new Set([
+      sourceObj.associatedNodeId,
+      ...(sourceObj.entranceNodeIds || [])
+    ])).filter(id => Boolean(id) && this.nodes.has(id));
 
-    if (!this.nodes.has(startNode) || !this.nodes.has(endNode)) {
-       return { success: false, nodes: [], objects: [], totalDistanceMeters: 0, estimatedTimeSeconds: 0, floors: [], buildings: [], transitions: [], message: 'Routing nodes missing from graph.' };
+    const targetEntrances = new Set(Array.from(new Set([
+      targetObj.associatedNodeId,
+      ...(targetObj.entranceNodeIds || [])
+    ])).filter(id => Boolean(id) && this.nodes.has(id)));
+
+    if (sourceEntrances.length === 0 || targetEntrances.size === 0) {
+      return { success: false, nodes: [], objects: [], totalDistanceMeters: 0, estimatedTimeSeconds: 0, floors: [], buildings: [], transitions: [], message: 'Routing nodes missing from graph (objects must have at least one valid entrance node).' };
     }
 
-    // A* Initialization
+    // A* Initialization supporting multiple entrances
     const frontier = new PriorityQueue<string>();
-    frontier.enqueue(startNode, 0);
-
     const cameFrom = new Map<string, { node: string, edge: CampusConnection } | null>();
     const costSoFar = new Map<string, number>();
 
-    cameFrom.set(startNode, null);
-    costSoFar.set(startNode, 0);
+    for (const sNode of sourceEntrances) {
+      frontier.enqueue(sNode, 0);
+      cameFrom.set(sNode, null);
+      costSoFar.set(sNode, 0);
+    }
 
-    let found = false;
+    let reachedTargetNode: string | null = null;
 
     while (!frontier.isEmpty()) {
       const current = frontier.dequeue()!;
 
-      if (current === endNode) {
-        found = true;
+      if (targetEntrances.has(current)) {
+        reachedTargetNode = current;
         break;
       }
 
@@ -161,29 +198,55 @@ export class RoutingEngine {
         if (prefs.accessibleOnly && !edge.isAccessible) continue;
         if (prefs.mode === 'vehicle' && !edge.isVehicleAccessible) continue;
         if (prefs.mode === 'walking' && !edge.isWalkable) continue;
+        if (!prefs.allowRestricted && (edge.isRestricted || this.nodes.get(edge.targetNodeId)?.isRestricted)) continue;
+
+        // Dynamic access schedules and temporary closure rules
+        if (!prefs.allowRestricted) {
+          const edgeAccess = accessRuleService.isTargetAccessible('edge', edge.id);
+          if (!edgeAccess.isAccessible && edgeAccess.isRoutingBlocked) continue;
+
+          if (edge.targetFloorId) {
+            const floorAccess = accessRuleService.isTargetAccessible('floor', edge.targetFloorId);
+            if (!floorAccess.isAccessible && floorAccess.isRoutingBlocked) continue;
+          }
+        }
+
+        // Dynamic access schedules and temporary closure rules
+        if (!prefs.allowRestricted) {
+          const edgeAccess = accessRuleService.isTargetAccessible('edge', edge.id);
+          if (!edgeAccess.isAccessible && edgeAccess.isRoutingBlocked) continue;
+
+          if (edge.targetFloorId) {
+            const floorAccess = accessRuleService.isTargetAccessible('floor', edge.targetFloorId);
+            if (!floorAccess.isAccessible && floorAccess.isRoutingBlocked) continue;
+          }
+        }
 
         // Custom weights
         const newCost = costSoFar.get(current)! + (edge.distanceMeters * edge.weightMultiplier);
-
         const nextNode = edge.targetNodeId;
         
         if (!costSoFar.has(nextNode) || newCost < costSoFar.get(nextNode)!) {
           costSoFar.set(nextNode, newCost);
-          const priority = newCost + this.heuristic(nextNode, endNode);
-          frontier.enqueue(nextNode, priority);
+          let minH = Infinity;
+          for (const tNode of targetEntrances) {
+            const h = this.heuristic(nextNode, tNode);
+            if (h < minH) minH = h;
+          }
+          frontier.enqueue(nextNode, newCost + (minH === Infinity ? 0 : minH));
           cameFrom.set(nextNode, { node: current, edge });
         }
       }
     }
 
-    if (!found) {
+    if (!reachedTargetNode) {
       return { success: false, nodes: [], objects: [], totalDistanceMeters: 0, estimatedTimeSeconds: 0, floors: [], buildings: [], transitions: [], message: 'No valid route found.' };
     }
 
     // Reconstruct path
     const pathNodes: string[] = [];
     const pathEdges: CampusConnection[] = [];
-    let curr: string | null = endNode;
+    let curr: string | null = reachedTargetNode;
 
     while (curr !== null) {
       pathNodes.push(curr);
@@ -206,7 +269,7 @@ export class RoutingEngine {
     const transitions: RouteTransition[] = [];
 
     // Add source building/floor
-    const sourceNode = this.nodes.get(startNode);
+    const sourceNode = this.nodes.get(pathNodes[0]);
     if (sourceNode?.floorId) floorsSet.add(sourceNode.floorId);
     if (sourceNode?.buildingId) buildingsSet.add(sourceNode.buildingId);
 
@@ -216,11 +279,12 @@ export class RoutingEngine {
       if (edge.targetFloorId) floorsSet.add(edge.targetFloorId);
       if (edge.targetBuildingId) buildingsSet.add(edge.targetBuildingId);
 
-      // Identify transitions (floor or building change, or specific types like stairs/elevators)
+      // Identify transitions (floor or building change, or specific types like stairs/elevators/ramps/bridges)
       if (edge.connectionType !== 'corridor' && edge.connectionType !== 'door') {
          let desc = `Use ${edge.connectionType}`;
          if (edge.connectionType === 'staircase') desc = `Take the stairs`;
          if (edge.connectionType === 'elevator') desc = `Take the elevator`;
+         if (edge.connectionType === 'ramp') desc = `Use the accessible ramp`;
          if (edge.connectionType === 'bridge') desc = `Cross the bridge`;
          if (edge.targetFloorId && edge.sourceFloorId !== edge.targetFloorId) {
              desc += ` to another floor`;
@@ -232,7 +296,9 @@ export class RoutingEngine {
            fromNodeId: edge.sourceNodeId,
            toNodeId: edge.targetNodeId,
            type: edge.connectionType,
-           description: desc
+           description: desc,
+           fromFloorId: edge.sourceFloorId,
+           toFloorId: edge.targetFloorId,
          });
       }
     }
@@ -240,6 +306,10 @@ export class RoutingEngine {
     // Basic time estimate: 1.4 m/s walking, 5 m/s vehicle
     const speed = prefs.mode === 'vehicle' ? 5 : 1.4;
     const estimatedTimeSeconds = totalDist / speed;
+
+    const startName = sourceObj ? (typeof sourceObj.name === 'string' ? sourceObj.name : sourceObj.name.en) : undefined;
+    const destName = targetObj ? (typeof targetObj.name === 'string' ? targetObj.name : targetObj.name.en) : undefined;
+    const steps = this.generateSteps(pathNodes, pathEdges, startName, destName, speed);
 
     return {
       success: true,
@@ -249,7 +319,8 @@ export class RoutingEngine {
       estimatedTimeSeconds,
       floors: Array.from(floorsSet),
       buildings: Array.from(buildingsSet),
-      transitions
+      transitions,
+      steps,
     };
   }
 
@@ -283,6 +354,18 @@ export class RoutingEngine {
         if (prefs.accessibleOnly && !edge.isAccessible) continue;
         if (prefs.mode === 'vehicle' && !edge.isVehicleAccessible) continue;
         if (prefs.mode === 'walking' && !edge.isWalkable) continue;
+        if (!prefs.allowRestricted && (edge.isRestricted || this.nodes.get(edge.targetNodeId)?.isRestricted)) continue;
+
+        // Dynamic access schedules and temporary closure rules
+        if (!prefs.allowRestricted) {
+          const edgeAccess = accessRuleService.isTargetAccessible('edge', edge.id);
+          if (!edgeAccess.isAccessible && edgeAccess.isRoutingBlocked) continue;
+
+          if (edge.targetFloorId) {
+            const floorAccess = accessRuleService.isTargetAccessible('floor', edge.targetFloorId);
+            if (!floorAccess.isAccessible && floorAccess.isRoutingBlocked) continue;
+          }
+        }
 
         const newCost = costSoFar.get(current)! + (edge.distanceMeters * edge.weightMultiplier);
         const nextNode = edge.targetNodeId;
@@ -348,12 +431,17 @@ export class RoutingEngine {
           toNodeId: edge.targetNodeId,
           type: edge.connectionType,
           description: desc,
+          fromFloorId: edge.sourceFloorId,
+          toFloorId: edge.targetFloorId,
         });
       }
     }
 
     const speed = prefs.mode === 'vehicle' ? 5 : 1.4;
     const estimatedTimeSeconds = totalDist / speed;
+    const startNodeObj = this.nodes.get(startNode);
+    const endNodeObj = this.nodes.get(endNode);
+    const steps = this.generateSteps(pathNodes, pathEdges, startNodeObj?.label, endNodeObj?.label, speed);
 
     return {
       success: true,
@@ -364,7 +452,117 @@ export class RoutingEngine {
       floors: Array.from(floorsSet),
       buildings: Array.from(buildingsSet),
       transitions,
+      steps,
     };
+  }
+
+  private generateSteps(
+    pathNodes: string[],
+    pathEdges: CampusConnection[],
+    startName?: string,
+    destName?: string,
+    speed = 1.4
+  ): RouteStep[] {
+    const steps: RouteStep[] = [];
+    if (pathNodes.length === 0) return steps;
+
+    const firstNode = this.nodes.get(pathNodes[0]);
+    steps.push({
+      stepIndex: 1,
+      instruction: startName ? `Start at ${startName}` : `Depart from ${firstNode?.label || 'starting point'}`,
+      distanceMeters: 0,
+      durationSeconds: 0,
+      turnType: 'depart',
+      floorId: firstNode?.floorId,
+      buildingId: firstNode?.buildingId,
+      nodeId: firstNode?.id,
+    });
+
+    let prevVec: { x: number; y: number } | null = null;
+
+    for (let i = 0; i < pathEdges.length; i++) {
+      const edge = pathEdges[i];
+      const src = this.nodes.get(edge.sourceNodeId);
+      const tgt = this.nodes.get(edge.targetNodeId);
+      const durationSeconds = Math.round(edge.distanceMeters / speed);
+
+      let turnType: RouteStep['turnType'] = 'straight';
+      let instruction = '';
+
+      if (edge.connectionType === 'elevator') {
+        turnType = 'elevator';
+        instruction = `Take the elevator to ${edge.targetFloorId || 'destination floor'}`;
+        prevVec = null;
+      } else if (edge.connectionType === 'staircase') {
+        turnType = 'stairs';
+        instruction = `Take the stairs to ${edge.targetFloorId || 'destination floor'}`;
+        prevVec = null;
+      } else if (edge.connectionType === 'ramp') {
+        turnType = 'ramp';
+        instruction = `Use the accessible ramp`;
+        prevVec = null;
+      } else if (edge.connectionType === 'bridge') {
+        turnType = 'bridge';
+        instruction = `Cross the skybridge link`;
+        prevVec = null;
+      } else if (edge.connectionType === 'door') {
+        turnType = 'straight';
+        instruction = tgt?.label ? `Pass through ${tgt.label}` : `Pass through entrance door (${edge.distanceMeters} m)`;
+      } else {
+        // Corridor
+        if (src && tgt) {
+          const curVec = { x: tgt.coordinates.x - src.coordinates.x, y: tgt.coordinates.y - src.coordinates.y };
+          if (prevVec && (prevVec.x !== 0 || prevVec.y !== 0) && (curVec.x !== 0 || curVec.y !== 0)) {
+            const angle1 = Math.atan2(prevVec.y, prevVec.x);
+            const angle2 = Math.atan2(curVec.y, curVec.x);
+            let diff = angle2 - angle1;
+            while (diff > Math.PI) diff -= 2 * Math.PI;
+            while (diff < -Math.PI) diff += 2 * Math.PI;
+
+            if (diff > 0.4) {
+              turnType = diff > 1.2 ? 'right' : 'slight_right';
+              instruction = `Turn right along corridor (${edge.distanceMeters} m)`;
+            } else if (diff < -0.4) {
+              turnType = diff < -1.2 ? 'left' : 'slight_left';
+              instruction = `Turn left along corridor (${edge.distanceMeters} m)`;
+            } else {
+              turnType = 'straight';
+              instruction = `Continue straight down ${edge.name || 'corridor'} (${edge.distanceMeters} m)`;
+            }
+          } else {
+            instruction = `Walk down ${edge.name || 'corridor'} (${edge.distanceMeters} m)`;
+          }
+          prevVec = curVec;
+        } else {
+          instruction = `Walk along ${edge.name || 'corridor'} (${edge.distanceMeters} m)`;
+        }
+      }
+
+      steps.push({
+        stepIndex: steps.length + 1,
+        instruction,
+        distanceMeters: edge.distanceMeters,
+        durationSeconds,
+        turnType,
+        floorId: edge.targetFloorId || edge.sourceFloorId,
+        buildingId: edge.targetBuildingId || edge.sourceBuildingId,
+        nodeId: edge.targetNodeId,
+      });
+    }
+
+    const lastNode = this.nodes.get(pathNodes[pathNodes.length - 1]);
+    steps.push({
+      stepIndex: steps.length + 1,
+      instruction: destName ? `Arrive at ${destName}` : `Arrive at ${lastNode?.label || 'destination'}`,
+      distanceMeters: 0,
+      durationSeconds: 0,
+      turnType: 'arrive',
+      floorId: lastNode?.floorId,
+      buildingId: lastNode?.buildingId,
+      nodeId: lastNode?.id,
+    });
+
+    return steps;
   }
 }
 
@@ -374,7 +572,7 @@ export const routingService = {
     campusId: string,
     source: string,
     target: string,
-    options?: { accessibleOnly?: boolean; mode?: 'walking' | 'vehicle'; blockedConnectionIds?: string[] }
+    options?: { accessibleOnly?: boolean; mode?: 'walking' | 'vehicle'; blockedConnectionIds?: string[]; allowRestricted?: boolean }
   ): Promise<{ success: boolean; data: RouteResult }> => {
     // Dynamic import to avoid circular dependency issues at import time
     const { navStore } = await import('./nav.store');
@@ -389,6 +587,7 @@ export const routingService = {
       mode: options?.mode || 'walking',
       accessibleOnly: options?.accessibleOnly ?? false,
       blockedConnectionIds: options?.blockedConnectionIds,
+      allowRestricted: options?.allowRestricted ?? false,
     };
 
     const sourceObj = objects.find(o => o.id === source);

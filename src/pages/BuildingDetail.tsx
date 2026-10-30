@@ -9,7 +9,7 @@ import { LoadingState } from '../components/ui/LoadingState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Modal } from '../components/ui/Modal';
-import { Layers, Plus, Edit2, Map, Copy } from 'lucide-react';
+import { Layers, Plus, Edit2, Map, Copy, Box } from 'lucide-react';
 
 export const BuildingDetail: React.FC = () => {
   const { campusId, buildingId } = useParams<{ campusId: string; buildingId: string }>();
@@ -26,6 +26,9 @@ export const BuildingDetail: React.FC = () => {
   const [isCreatingFloor, setIsCreatingFloor] = useState(false);
   const [newFloorName, setNewFloorName] = useState('');
   const [newFloorLevel, setNewFloorLevel] = useState<number>(0);
+  const [newFloorWidthM, setNewFloorWidthM] = useState(100);
+  const [newFloorHeightM, setNewFloorHeightM] = useState(60);
+  const [newFloorCode, setNewFloorCode] = useState('');
   const [saving, setSaving] = useState(false);
   
   const [duplicateConfirm, setDuplicateConfirm] = useState<Floor | null>(null);
@@ -69,10 +72,16 @@ export const BuildingDetail: React.FC = () => {
         campusId: campus.id,
         buildingId: building.id,
         name: { en: newFloorName },
-        level: newFloorLevel
+        level: newFloorLevel,
+        code: newFloorCode.trim() || undefined,
+        dimensions: { widthMeters: newFloorWidthM, heightMeters: newFloorHeightM },
       });
       if (res.success && res.data) {
         setIsCreatingFloor(false);
+        setNewFloorName('');
+        setNewFloorCode('');
+        setNewFloorWidthM(100);
+        setNewFloorHeightM(60);
         navigate(`/admin/campuses/${campus.id}/buildings/${building.id}/floors/${res.data.id}`);
       }
     } finally {
@@ -84,16 +93,18 @@ export const BuildingDetail: React.FC = () => {
     if (!duplicateConfirm || !duplicateName.trim() || !campus || !building) return;
     try {
       setSaving(true);
-      const res = await campusService.createFloor({
-        campusId: campus.id,
-        buildingId: building.id,
-        name: { en: duplicateName },
-        level: duplicateLevel
-      });
+      const res = await campusService.duplicateFloor(
+        duplicateConfirm.id,
+        duplicateLevel,
+        { en: duplicateName },
+        true
+      );
       if (res.success && res.data) {
         setDuplicateConfirm(null);
         setDuplicateName('');
         loadData(campus.id, building.id);
+      } else {
+        alert(res.message || 'Failed to duplicate floor.');
       }
     } finally {
       setSaving(false);
@@ -172,21 +183,24 @@ export const BuildingDetail: React.FC = () => {
             ) : (
               <div className="grid grid-cols-1 gap-3">
                 {floors.map(floor => (
-                  <Link key={floor.id} to={`/admin/campuses/${campus.id}/buildings/${building.id}/floors/${floor.id}`} className="group bg-white rounded-lg border border-slate-200 shadow-sm hover:border-blue-300 transition-all p-4 flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center font-bold font-mono">
+                  <div key={floor.id} className="group bg-white rounded-lg border border-slate-200 shadow-sm hover:border-blue-300 transition-all p-4 flex items-center justify-between">
+                    <Link to={`/admin/campuses/${campus.id}/buildings/${building.id}/floors/${floor.id}`} className="flex items-center gap-4 flex-1 min-w-0">
+                      <div className="w-10 h-10 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center font-bold font-mono shrink-0">
                         L{floor.level}
                       </div>
-                      <div>
-                        <h3 className="font-outfit font-bold text-slate-900 group-hover:text-blue-600 transition-colors">
+                      <div className="min-w-0">
+                        <h3 className="font-outfit font-bold text-slate-900 group-hover:text-blue-600 transition-colors truncate">
                           {floor.name.en}
                         </h3>
                         <p className="text-xs text-slate-500 mt-0.5">
-                          Code: {floor.code} • Dimensions: {floor.dimensions.widthMeters}x{floor.dimensions.heightMeters}m
+                          Code: {floor.code} • Dims: {floor.dimensions.widthMeters}×{floor.dimensions.heightMeters}m
                         </p>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
+                    </Link>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Link to={`/admin/campuses/${campus.id}/buildings/${building.id}/floors/${floor.id}/objects`}>
+                        <Button variant="outline" size="sm" icon={<Box size={14} />} className="opacity-0 group-hover:opacity-100 transition-opacity">Objects</Button>
+                      </Link>
                       <Button 
                         variant="ghost" 
                         size="sm"
@@ -200,9 +214,11 @@ export const BuildingDetail: React.FC = () => {
                       >
                         <Copy size={16} />
                       </Button>
-                      <Button variant="outline" size="sm" icon={<Map size={14} />}>Map Editor</Button>
+                      <Link to={`/admin/campuses/${campus.id}/buildings/${building.id}/floors/${floor.id}`}>
+                        <Button variant="outline" size="sm" icon={<Map size={14} />}>Map Editor</Button>
+                      </Link>
                     </div>
-                  </Link>
+                  </div>
                 ))}
               </div>
             )}
@@ -212,21 +228,47 @@ export const BuildingDetail: React.FC = () => {
 
       <Modal isOpen={isCreatingFloor} onClose={() => setIsCreatingFloor(false)} title="Create New Floor">
         <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <Input 
+              label="Floor Name (English)" 
+              placeholder="e.g. Ground Floor" 
+              value={newFloorName}
+              onChange={e => setNewFloorName(e.target.value)}
+              autoFocus
+            />
+            <Input
+              label="Short Code (optional)"
+              placeholder="e.g. G-FLR"
+              value={newFloorCode}
+              onChange={e => setNewFloorCode(e.target.value.toUpperCase())}
+            />
+          </div>
           <Input 
-            label="Floor Name (English)" 
-            placeholder="e.g. Ground Floor, Basement 1" 
-            value={newFloorName}
-            onChange={e => setNewFloorName(e.target.value)}
-            autoFocus
-          />
-          <Input 
-            label="Level" 
+            label="Level Number" 
             type="number"
             placeholder="0 = Ground, 1 = First, -1 = Basement" 
             value={newFloorLevel}
-            onChange={e => setNewFloorLevel(parseInt(e.target.value))}
-            helperText="0 is Ground Floor, positive for upper floors, negative for basements."
+            onChange={e => setNewFloorLevel(parseInt(e.target.value) || 0)}
+            helperText="0 = Ground Floor, positive = upper, negative = basement"
           />
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1.5">Floor Dimensions</label>
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Width (meters)"
+                type="number"
+                value={newFloorWidthM}
+                onChange={e => setNewFloorWidthM(parseFloat(e.target.value) || 100)}
+              />
+              <Input
+                label="Height (meters)"
+                type="number"
+                value={newFloorHeightM}
+                onChange={e => setNewFloorHeightM(parseFloat(e.target.value) || 60)}
+              />
+            </div>
+            <p className="text-xs text-slate-400 mt-1">These define the canvas scale in the map editor.</p>
+          </div>
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={() => setIsCreatingFloor(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateFloor} isLoading={saving} disabled={!newFloorName.trim()}>Create Floor</Button>

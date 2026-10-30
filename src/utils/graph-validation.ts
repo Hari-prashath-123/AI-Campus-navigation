@@ -9,6 +9,7 @@ export interface GraphValidationError {
   title: string;
   description: string;
   floorId?: string;
+  subType?: 'unreachable_room' | 'missing_entrance' | 'disconnected_path' | 'invalid_transition' | 'duplicate_edge' | 'dangling_connection' | 'stale_reference';
 }
 
 export interface GraphValidationReport {
@@ -20,6 +21,8 @@ export interface GraphValidationReport {
   totalObjects: number;
   disconnectedNodeCount: number;
   unreachableObjectCount: number;
+  duplicateEdgeCount: number;
+  danglingEdgeCount: number;
 }
 
 /**
@@ -49,8 +52,31 @@ export function findDanglingEdges(
 }
 
 /**
+ * Finds duplicate connections (e.g. identical pairs connecting the same two nodes).
+ */
+export function findDuplicateEdges(connections: CampusConnection[]): CampusConnection[] {
+  const seen = new Set<string>();
+  const duplicates: CampusConnection[] = [];
+
+  for (const c of connections) {
+    const key = c.isBidirectional
+      ? (c.sourceNodeId < c.targetNodeId ? `${c.sourceNodeId}__${c.targetNodeId}` : `${c.targetNodeId}__${c.sourceNodeId}`)
+      : `${c.sourceNodeId}-->${c.targetNodeId}`;
+
+    if (seen.has(key)) {
+      duplicates.push(c);
+    } else {
+      seen.add(key);
+    }
+  }
+
+  return duplicates;
+}
+
+/**
  * Finds objects that don't have an associated navigation node, or whose associated
  * node does not exist in the node graph, or whose node has no edges.
+ * Supports multiple entrance nodes (obj.entranceNodeIds).
  */
 export function findUnreachableObjects(
   objects: MapObject[],
@@ -67,17 +93,24 @@ export function findUnreachableObjects(
   const results: { object: MapObject; reason: 'missing_node_ref' | 'node_not_found' | 'node_isolated' }[] = [];
 
   for (const obj of objects) {
-    if (!obj.associatedNodeId) {
+    const entrances = Array.from(new Set([
+      obj.associatedNodeId,
+      ...(obj.entranceNodeIds || [])
+    ])).filter(Boolean);
+
+    if (entrances.length === 0) {
       results.push({ object: obj, reason: 'missing_node_ref' });
       continue;
     }
 
-    if (!nodeMap.has(obj.associatedNodeId)) {
+    const existingEntrances = entrances.filter(id => nodeMap.has(id));
+    if (existingEntrances.length === 0) {
       results.push({ object: obj, reason: 'node_not_found' });
       continue;
     }
 
-    if (!connectedNodeIds.has(obj.associatedNodeId)) {
+    const hasConnectedEntrance = existingEntrances.some(id => connectedNodeIds.has(id));
+    if (!hasConnectedEntrance) {
       results.push({ object: obj, reason: 'node_isolated' });
     }
   }
@@ -90,7 +123,8 @@ export function findUnreachableObjects(
  * Checks that inter-floor edges correctly link different floors and have appropriate connector types.
  */
 export function validateFloorTransitions(
-  connections: CampusConnection[]
+  connections: CampusConnection[],
+  _nodes?: SpatialNode[]
 ): GraphValidationError[] {
   const issues: GraphValidationError[] = [];
 
@@ -103,6 +137,7 @@ export function validateFloorTransitions(
         id: `trans_${conn.id}`,
         type: 'warning',
         category: 'transition',
+        subType: 'invalid_transition',
         entityId: conn.id,
         title: 'Unexpected Inter-floor Connection Type',
         description: `Connection "${conn.name}" crosses floors (${conn.sourceFloorId} -> ${conn.targetFloorId}) but has type "${conn.connectionType}". Usually stairs, elevators, or ramps should be used.`,
@@ -115,6 +150,7 @@ export function validateFloorTransitions(
         id: `vert_${conn.id}`,
         type: 'info',
         category: 'transition',
+        subType: 'invalid_transition',
         entityId: conn.id,
         title: 'Single-floor Vertical Connector',
         description: `Vertical connection "${conn.name}" (${conn.connectionType}) connects nodes on the same floor. Consider linking it to the adjacent floor.`,
@@ -144,6 +180,7 @@ export function validateCampusGraph(
       id: `dangling_${edge.id}`,
       type: 'error',
       category: 'edge',
+      subType: 'dangling_connection',
       entityId: edge.id,
       title: 'Broken Connection Reference',
       description: `Edge "${edge.name}" references a missing source or target node.`,
@@ -151,13 +188,29 @@ export function validateCampusGraph(
     });
   }
 
-  // 2. Disconnected nodes
+  // 2. Duplicate edges
+  const duplicates = findDuplicateEdges(connections);
+  for (const edge of duplicates) {
+    warnings.push({
+      id: `dup_${edge.id}`,
+      type: 'warning',
+      category: 'edge',
+      subType: 'duplicate_edge',
+      entityId: edge.id,
+      title: 'Duplicate Edge Connection',
+      description: `Multiple connections link the same nodes ("${edge.name}").`,
+      floorId: edge.sourceFloorId,
+    });
+  }
+
+  // 3. Disconnected nodes
   const disconnected = findDisconnectedNodes(nodes, connections);
   for (const node of disconnected) {
     warnings.push({
       id: `disc_${node.id}`,
       type: 'warning',
       category: 'node',
+      subType: 'disconnected_path',
       entityId: node.id,
       title: 'Disconnected Navigation Node',
       description: `Node ${node.label || node.id} (${node.type}) is not connected to any other node.`,
@@ -165,7 +218,7 @@ export function validateCampusGraph(
     });
   }
 
-  // 3. Unreachable objects
+  // 4. Unreachable objects & missing entrances
   const unreachable = findUnreachableObjects(objects, nodes, connections);
   for (const item of unreachable) {
     const objName = typeof item.object.name === 'string' ? item.object.name : item.object.name.en || item.object.code;
@@ -174,9 +227,10 @@ export function validateCampusGraph(
         id: `unreach_${item.object.id}`,
         type: 'warning',
         category: 'object',
+        subType: 'missing_entrance',
         entityId: item.object.id,
-        title: 'Unlinked Map Object',
-        description: `Object "${objName}" has no entrance door / navigation node associated with it.`,
+        title: 'Missing Room Entrance',
+        description: `Room "${objName}" has no entrance door / navigation node associated with it.`,
         floorId: item.object.floorId,
       });
     } else if (item.reason === 'node_not_found') {
@@ -184,9 +238,10 @@ export function validateCampusGraph(
         id: `unreach_${item.object.id}`,
         type: 'error',
         category: 'object',
+        subType: 'stale_reference',
         entityId: item.object.id,
         title: 'Missing Node Reference',
-        description: `Object "${objName}" references a navigation node that does not exist in the graph.`,
+        description: `Room "${objName}" references a navigation node that does not exist in the graph.`,
         floorId: item.object.floorId,
       });
     } else if (item.reason === 'node_isolated') {
@@ -194,16 +249,17 @@ export function validateCampusGraph(
         id: `unreach_${item.object.id}`,
         type: 'warning',
         category: 'object',
+        subType: 'unreachable_room',
         entityId: item.object.id,
-        title: 'Unreachable Object Entrance',
-        description: `Object "${objName}" is connected to a node that has no path to the rest of the campus.`,
+        title: 'Unreachable Room Entrance',
+        description: `Room "${objName}" door is not connected to any walkable corridor path.`,
         floorId: item.object.floorId,
       });
     }
   }
 
-  // 4. Floor transitions
-  const transitionIssues = validateFloorTransitions(connections);
+  // 5. Floor transitions
+  const transitionIssues = validateFloorTransitions(connections, nodes);
   for (const issue of transitionIssues) {
     if (issue.type === 'error') errors.push(issue);
     else warnings.push(issue);
@@ -218,5 +274,7 @@ export function validateCampusGraph(
     totalObjects: objects.length,
     disconnectedNodeCount: disconnected.length,
     unreachableObjectCount: unreachable.length,
+    duplicateEdgeCount: duplicates.length,
+    danglingEdgeCount: dangling.length,
   };
 }

@@ -1,5 +1,5 @@
 import { SpatialNode, CampusConnection } from '../types/connection';
-import { INITIAL_NODES } from './mock-data';
+import { INITIAL_NODES, INITIAL_CONNECTIONS } from './mock-data';
 import { v4 as uuidv4 } from 'uuid';
 
 const LS_NODES       = 'omnicampus_nodes';
@@ -18,7 +18,7 @@ function save<T>(key: string, data: T[]) {
 }
 
 let nodes: SpatialNode[] = load<SpatialNode>(LS_NODES, INITIAL_NODES);
-let connections: CampusConnection[] = load<CampusConnection>(LS_CONNECTIONS, []);
+let connections: CampusConnection[] = load<CampusConnection>(LS_CONNECTIONS, INITIAL_CONNECTIONS);
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -32,6 +32,7 @@ export const navStore = {
 
   getNodes():       SpatialNode[]       { return nodes; },
   getConnections(): CampusConnection[] { return connections; },
+  getAllConnections(): CampusConnection[] { return connections; },
 
   getNodesByCampus(campusId: string): SpatialNode[] {
     return nodes.filter(n => n.campusId === campusId);
@@ -46,8 +47,8 @@ export const navStore = {
     return nodes.find(n => n.id === id);
   },
 
-  createNode(data: Omit<SpatialNode, 'id'>): SpatialNode {
-    const node: SpatialNode = { id: uuidv4(), ...data };
+  createNode(data: Omit<SpatialNode, 'id'> & { id?: string }): SpatialNode {
+    const node: SpatialNode = { id: data.id || uuidv4(), ...data };
     nodes = [...nodes, node];
     save(LS_NODES, nodes);
     notify();
@@ -87,10 +88,10 @@ export const navStore = {
     return connections.find(c => c.id === id);
   },
 
-  createConnection(data: Omit<CampusConnection, 'id' | 'createdAt' | 'updatedAt'>): CampusConnection | { error: string } {
+  createConnection(data: Omit<CampusConnection, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): CampusConnection | { error: string } {
     if (data.sourceNodeId === data.targetNodeId) return { error: 'Source and target node cannot be the same.' };
     const now = new Date().toISOString();
-    const conn: CampusConnection = { id: uuidv4(), ...data, createdAt: now, updatedAt: now };
+    const conn: CampusConnection = { id: data.id || uuidv4(), ...data, createdAt: now, updatedAt: now };
     connections = [...connections, conn];
     save(LS_CONNECTIONS, connections);
     notify();
@@ -125,9 +126,17 @@ export const navStore = {
     notify();
   },
 
-  reset(): void {
-    nodes = [...INITIAL_NODES];
-    connections = [];
+  setNodesAndConnections(newNodes: SpatialNode[], newConnections: CampusConnection[]): void {
+    nodes = [...newNodes];
+    connections = [...newConnections];
+    save(LS_NODES, nodes);
+    save(LS_CONNECTIONS, connections);
+    notify();
+  },
+
+  reset(newNodes?: SpatialNode[], newConnections?: CampusConnection[]): void {
+    nodes = newNodes ? [...newNodes] : [...INITIAL_NODES];
+    connections = newConnections ? [...newConnections] : [...INITIAL_CONNECTIONS];
     save(LS_NODES, nodes);
     save(LS_CONNECTIONS, connections);
     notify();

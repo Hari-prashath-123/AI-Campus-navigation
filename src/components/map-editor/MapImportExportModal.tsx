@@ -361,11 +361,32 @@ export const MapImportExportModal: React.FC<MapImportExportModalProps> = ({
           ) : (
             <>
               {/* Import Tab */}
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Paste JSON or GeoJSON</label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block font-semibold text-slate-700">Import Geometry File or Text</label>
+                  <label className="cursor-pointer text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1">
+                    <Upload size={13} />
+                    <span>Upload JSON/GeoJSON</span>
+                    <input
+                      type="file"
+                      accept=".json,.geojson,application/json"
+                      className="hidden"
+                      onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = ev => {
+                          const content = ev.target?.result as string;
+                          if (content) handleParseImport(content);
+                        };
+                        reader.readAsText(file);
+                      }}
+                    />
+                  </label>
+                </div>
                 <textarea
-                  rows={8}
-                  placeholder="Paste your GeoJSON FeatureCollection or Map Bundle JSON here..."
+                  rows={7}
+                  placeholder="Paste your GeoJSON FeatureCollection or Map Bundle JSON here, or click 'Upload JSON/GeoJSON' above..."
                   value={importText}
                   onChange={e => handleParseImport(e.target.value)}
                   className="w-full p-3 border border-slate-300 rounded-lg font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500"

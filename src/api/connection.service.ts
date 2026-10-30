@@ -1,5 +1,31 @@
-import { CampusConnection } from '../types/connection';
+import { CampusConnection, ConnectionType } from '../types/connection';
 import { navStore } from './nav.store';
+
+export interface VerticalTransitionInput {
+  campusId: string;
+  buildingId: string;
+  connectorType: 'elevator' | 'staircase' | 'ramp' | 'escalator';
+  shaftName: string;
+  floorNodePairs: { floorId: string; nodeId: string }[];
+  isAccessible?: boolean;
+}
+
+export interface InterBuildingConnectionInput {
+  campusId: string;
+  name: string;
+  sourceBuildingId: string;
+  sourceFloorId?: string;
+  sourceNodeId: string;
+  targetBuildingId: string;
+  targetFloorId?: string;
+  targetNodeId: string;
+  connectionType: 'bridge' | 'building_to_building';
+  distanceMeters: number;
+  isCovered?: boolean;
+  isAccessible?: boolean;
+  isBidirectional?: boolean;
+  description?: string;
+}
 
 /**
  * connectionService — unified adapter over the persistent navStore.
@@ -44,6 +70,8 @@ export const connectionService = {
         isAccessible: data.isAccessible ?? true,
         isWalkable: data.isWalkable ?? true,
         isVehicleAccessible: data.isVehicleAccessible ?? false,
+        isRestricted: data.isRestricted ?? false,
+        requiredPermissions: data.requiredPermissions,
         distanceMeters: data.distanceMeters || 10,
         weightMultiplier: data.weightMultiplier || 1.0,
         availability: data.availability,
@@ -54,6 +82,75 @@ export const connectionService = {
       }
 
       resolve({ success: true, data: res });
+    });
+  },
+
+  /**
+   * Connects multiple floors through a shared vertical transition (staircase, elevator shaft, or ramp).
+   * Automatically creates sequential edges between consecutive floors in the provided array.
+   */
+  createVerticalTransition: async (input: VerticalTransitionInput): Promise<{ success: boolean; data: CampusConnection[]; message?: string }> => {
+    const { campusId, buildingId, connectorType, shaftName, floorNodePairs } = input;
+    if (floorNodePairs.length < 2) {
+      return { success: false, data: [], message: 'Vertical transition requires at least 2 floor-node pairs.' };
+    }
+
+    const createdConnections: CampusConnection[] = [];
+    const isAccessible = input.isAccessible ?? (connectorType === 'elevator' || connectorType === 'ramp');
+    const weightMultiplier = connectorType === 'staircase' ? 2.0 : connectorType === 'elevator' ? 1.2 : 1.5;
+
+    for (let i = 0; i < floorNodePairs.length - 1; i++) {
+      const current = floorNodePairs[i];
+      const next = floorNodePairs[i + 1];
+
+      const res = await connectionService.createConnection({
+        campusId,
+        sourceBuildingId: buildingId,
+        sourceFloorId: current.floorId,
+        sourceNodeId: current.nodeId,
+        targetBuildingId: buildingId,
+        targetFloorId: next.floorId,
+        targetNodeId: next.nodeId,
+        connectionType: connectorType as ConnectionType,
+        name: `${shaftName} (${connectorType})`,
+        isBidirectional: true,
+        isAccessible,
+        isWalkable: true,
+        isVehicleAccessible: false,
+        distanceMeters: 4.0, // standard vertical floor height in meters
+        weightMultiplier,
+      });
+
+      if (res.success && res.data) {
+        createdConnections.push(res.data);
+      } else {
+        return { success: false, data: createdConnections, message: res.message || 'Failed to create transition edge.' };
+      }
+    }
+
+    return { success: true, data: createdConnections };
+  },
+
+  /**
+   * Connects two buildings via an outdoor walkway, road, or elevated bridge.
+   */
+  createInterBuildingConnection: async (input: InterBuildingConnectionInput): Promise<{ success: boolean; data?: CampusConnection; message?: string }> => {
+    return connectionService.createConnection({
+      campusId: input.campusId,
+      sourceBuildingId: input.sourceBuildingId,
+      sourceFloorId: input.sourceFloorId,
+      sourceNodeId: input.sourceNodeId,
+      targetBuildingId: input.targetBuildingId,
+      targetFloorId: input.targetFloorId,
+      targetNodeId: input.targetNodeId,
+      connectionType: input.connectionType as ConnectionType,
+      name: input.name,
+      description: input.description,
+      distanceMeters: input.distanceMeters,
+      isAccessible: input.isAccessible ?? true,
+      isBidirectional: input.isBidirectional ?? true,
+      isWalkable: true,
+      weightMultiplier: 1.0,
     });
   },
 

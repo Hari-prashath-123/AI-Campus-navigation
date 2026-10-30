@@ -16,6 +16,7 @@ export interface CampusMetadata {
 
 export interface Campus {
   id: string;
+  organizationId?: string;
   slug: string; // e.g. "tech-institute" or "metro-health"
   name: LocalizedString;
   code: string;
@@ -29,6 +30,7 @@ export interface Campus {
 }
 
 export interface CreateCampusInput {
+  organizationId?: string;
   slug: string;
   name: LocalizedString;
   code: string;

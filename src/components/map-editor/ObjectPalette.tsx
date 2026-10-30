@@ -6,7 +6,7 @@ import { campusService } from '../../api/campus.service';
 import { objectService } from '../../api/object.service';
 import {
   Search, Loader2, Library, MapPin, MousePointer2, Hand, Square,
-  Circle, Hexagon, Minus, GitBranch, PenTool, ChevronDown
+  Circle, Hexagon, Minus, GitBranch, PenTool, ChevronDown, ArrowUpDown
 } from 'lucide-react';
 import * as icons from 'lucide-react';
 
@@ -261,6 +261,24 @@ export const ObjectPalette: React.FC<ObjectPaletteProps> = ({
                   <span>Connect Path</span>
                 </div>
                 <span className="text-[10px] text-slate-400 font-mono">(E)</span>
+              </button>
+
+              {/* Connect Floors tool */}
+              <button
+                onClick={() => onSelectTool?.('connect_floors')}
+                className={`w-full flex items-center justify-between p-2 rounded-lg text-xs font-medium border text-left transition-all ${
+                  activeTool === 'connect_floors'
+                    ? 'bg-blue-50 border-blue-400 text-blue-800 font-semibold shadow-sm'
+                    : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="w-6 h-6 rounded bg-blue-100 text-blue-700 flex items-center justify-center">
+                    <ArrowUpDown size={14} />
+                  </div>
+                  <span>Connect Floors</span>
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono">(Stairs)</span>
               </button>
             </div>
           </div>

@@ -16,6 +16,9 @@ export interface SpatialNode {
   geoCoordinates?: GeoPoint;
   isAccessible: boolean;
   label?: string;
+  isRestricted?: boolean;
+  requiredPermissions?: string[];
+  associatedObjectId?: string;
 }
 
 export type ConnectionType = 
@@ -52,6 +55,8 @@ export interface CampusConnection {
   isAccessible: boolean;
   isWalkable: boolean;
   isVehicleAccessible: boolean;
+  isRestricted?: boolean;
+  requiredPermissions?: string[];
   
   // Costs & Constraints
   distanceMeters: number;

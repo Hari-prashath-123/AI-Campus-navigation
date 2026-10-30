@@ -16,3 +16,4 @@ export * from './measurement';
 export * from './organization';
 export type { AccessRule, CreateAccessRuleInput } from './access-rule';
 export * from './import-export';
+export * from './security';

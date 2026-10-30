@@ -1,4 +1,6 @@
 import { AccessRule, CreateAccessRuleInput, AccessRuleTarget } from '../types/access-rule';
+import { authGuard } from './auth-guard';
+import { auditService } from './audit.service';
 import { v4 as uuidv4 } from 'uuid';
 
 const LS_ACCESS_RULES = 'omnicampus_access_rules';
@@ -39,6 +41,7 @@ export const accessRuleService = {
   },
 
   createRule: async (input: CreateAccessRuleInput): Promise<{ success: boolean; data?: AccessRule; message?: string }> => {
+    const user = await authGuard.enforce('create', 'access_rule', { campusId: input.campusId });
     const now = new Date().toISOString();
     const newRule: AccessRule = {
       id: uuidv4(),
@@ -64,10 +67,25 @@ export const accessRuleService = {
 
     rules = [...rules, newRule];
     save(LS_ACCESS_RULES, rules);
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'ACCESS_RULE_CHANGE',
+      resourceType: 'access_rule',
+      resourceId: newRule.id,
+      campusId: newRule.campusId,
+      status: 'SUCCESS',
+      details: { ruleType: newRule.ruleType, targetType: newRule.targetType, targetId: newRule.targetId },
+    });
+
     return { success: true, data: newRule };
   },
 
   updateRule: async (id: string, patch: Partial<AccessRule>): Promise<{ success: boolean; data?: AccessRule; message?: string }> => {
+    const existing = rules.find(r => r.id === id);
+    const user = await authGuard.enforce('update', 'access_rule', { campusId: existing?.campusId });
     const idx = rules.findIndex(r => r.id === id);
     if (idx === -1) return { success: false, message: 'Access rule not found' };
 
@@ -78,12 +96,39 @@ export const accessRuleService = {
     };
     rules = rules.map(r => r.id === id ? updated : r);
     save(LS_ACCESS_RULES, rules);
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'ACCESS_RULE_CHANGE',
+      resourceType: 'access_rule',
+      resourceId: id,
+      campusId: existing?.campusId,
+      status: 'SUCCESS',
+      details: { patch },
+    });
+
     return { success: true, data: updated };
   },
 
   deleteRule: async (id: string): Promise<{ success: boolean; message?: string }> => {
+    const existing = rules.find(r => r.id === id);
+    const user = await authGuard.enforce('delete', 'access_rule', { campusId: existing?.campusId });
     rules = rules.filter(r => r.id !== id);
     save(LS_ACCESS_RULES, rules);
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'ACCESS_RULE_CHANGE',
+      resourceType: 'access_rule',
+      resourceId: id,
+      campusId: existing?.campusId,
+      status: 'SUCCESS',
+    });
+
     return { success: true };
   },
 

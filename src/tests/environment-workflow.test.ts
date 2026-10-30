@@ -486,7 +486,9 @@ describe('Complete Reusable Environment-Configuration Workflow', () => {
   });
 
   it('exports an environment configuration and imports it into another site with complete data isolation', async () => {
-    // 1. Set up source site
+    // NOTE: This test does many sequential async API calls (each adds ~300ms network simulation delay).
+    // A 20-second timeout is intentional.
+
     const srcCampus = (await campusService.createCampus({
       slug: 'original-tech-center',
       code: 'OTC',
@@ -610,6 +612,6 @@ describe('Complete Reusable Environment-Configuration Workflow', () => {
     const srcObjectsNow = objectStore.getByCampus(srcCampus.id);
     expect(srcObjectsNow.length).toBe(1);
     expect(srcObjectsNow[0].id).toBe(srcRoom.id);
-  });
+  }, 20000); // Extended timeout: many sequential network-simulated API calls
 });
 

@@ -2,6 +2,8 @@ import { Campus, Building, Floor, LocalizedString } from '../types';
 import { INITIAL_CAMPUSES, INITIAL_BUILDINGS, INITIAL_FLOORS } from './mock-data';
 import { objectStore } from './object.store';
 import { navStore } from './nav.store';
+import { authGuard } from './auth-guard';
+import { auditService } from './audit.service';
 import { v4 as uuidv4 } from 'uuid';
 
 // ── localStorage persistence helpers ──────────────────────────────────────────
@@ -55,6 +57,7 @@ export const campusService = {
   },
 
   createCampus: async (data: Partial<Campus>): Promise<{ success: boolean; data?: Campus; message?: string }> => {
+    const user = await authGuard.enforce('create', 'campus', { organizationId: data.organizationId });
     const now = new Date().toISOString();
     const newCampus: Campus = {
       id: data.id || uuidv4(),
@@ -72,10 +75,24 @@ export const campusService = {
     };
     campuses = [...campuses, newCampus];
     save(LS_CAMPUSES, campuses);
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'CREATE',
+      resourceType: 'campus',
+      resourceId: newCampus.id,
+      campusId: newCampus.id,
+      organizationId: newCampus.organizationId,
+      status: 'SUCCESS',
+    });
+
     return { success: true, data: newCampus };
   },
 
   updateCampus: async (id: string, data: Partial<Campus>): Promise<{ success: boolean; data?: Campus; message?: string }> => {
+    const user = await authGuard.enforce('update', 'campus', { campusId: id });
     const idx = campuses.findIndex(c => c.id === id);
     if (idx === -1) return { success: false, message: 'Not found' };
 
@@ -86,6 +103,18 @@ export const campusService = {
     };
     campuses = campuses.map((c, i) => i === idx ? updated : c);
     save(LS_CAMPUSES, campuses);
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'UPDATE',
+      resourceType: 'campus',
+      resourceId: id,
+      campusId: id,
+      status: 'SUCCESS',
+    });
+
     return { success: true, data: updated };
   },
 
@@ -124,6 +153,7 @@ export const campusService = {
   },
 
   deleteCampus: async (id: string, force = false): Promise<{ success: boolean; message?: string }> => {
+    const user = await authGuard.enforce('delete', 'campus', { campusId: id });
     const safety = await campusService.canDeleteCampus(id);
     if (!safety.canDelete && !force) {
       return {
@@ -150,6 +180,17 @@ export const campusService = {
     const campusConns = navStore.getConnectionsByCampus(id);
     campusConns.forEach(c => navStore.deleteConnection(c.id));
 
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'DELETE',
+      resourceType: 'campus',
+      resourceId: id,
+      campusId: id,
+      status: 'SUCCESS',
+    });
+
     return { success: true };
   },
 
@@ -166,6 +207,7 @@ export const campusService = {
 
   createBuilding: async (data: Partial<Building>): Promise<{ success: boolean; data?: Building; message?: string }> => {
     if (!data.campusId) return { success: false, message: 'campusId required' };
+    const user = await authGuard.enforce('create', 'building', { campusId: data.campusId });
     const now = new Date().toISOString();
     const newBuilding: Building = {
       id: data.id || uuidv4(),
@@ -182,6 +224,18 @@ export const campusService = {
     };
     buildings = [...buildings, newBuilding];
     save(LS_BUILDINGS, buildings);
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'CREATE',
+      resourceType: 'building',
+      resourceId: newBuilding.id,
+      campusId: newBuilding.campusId,
+      status: 'SUCCESS',
+    });
+
     return { success: true, data: newBuilding };
   },
 
@@ -229,6 +283,8 @@ export const campusService = {
   },
 
   deleteBuilding: async (id: string, force = false): Promise<{ success: boolean; message?: string }> => {
+    const bld = buildings.find(b => b.id === id);
+    const user = await authGuard.enforce('delete', 'building', { campusId: bld?.campusId, resourceId: id });
     const safety = await campusService.canDeleteBuilding(id);
     if (!safety.canDelete && !force) {
       return {
@@ -245,6 +301,17 @@ export const campusService = {
     // Clean objects belonging to this building
     const bldObjs = objectStore.getByBuilding(id);
     bldObjs.forEach(o => objectStore.delete(o.id));
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'DELETE',
+      resourceType: 'building',
+      resourceId: id,
+      campusId: bld?.campusId,
+      status: 'SUCCESS',
+    });
 
     return { success: true };
   },
@@ -270,6 +337,7 @@ export const campusService = {
     if (!data.campusId || !data.buildingId) {
       return { success: false, message: 'campusId and buildingId required' };
     }
+    const user = await authGuard.enforce('create', 'floor', { campusId: data.campusId });
     const now = new Date().toISOString();
     const newFloor: Floor = {
       id: data.id || uuidv4(),
@@ -294,6 +362,18 @@ export const campusService = {
     };
     floors = [...floors, newFloor];
     save(LS_FLOORS, floors);
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'CREATE',
+      resourceType: 'floor',
+      resourceId: newFloor.id,
+      campusId: newFloor.campusId,
+      status: 'SUCCESS',
+    });
+
     return { success: true, data: newFloor };
   },
 
@@ -391,6 +471,8 @@ export const campusService = {
   },
 
   deleteFloor: async (id: string, force = false): Promise<{ success: boolean; message?: string }> => {
+    const flr = floors.find(f => f.id === id);
+    const user = await authGuard.enforce('delete', 'floor', { campusId: flr?.campusId, resourceId: id });
     const safety = await campusService.canDeleteFloor(id);
     if (!safety.canDelete && !force) {
       return {
@@ -409,6 +491,17 @@ export const campusService = {
 
     const floorConns = navStore.getConnectionsByFloor(id);
     floorConns.forEach(c => navStore.deleteConnection(c.id));
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'DELETE',
+      resourceType: 'floor',
+      resourceId: id,
+      campusId: flr?.campusId,
+      status: 'SUCCESS',
+    });
 
     return { success: true };
   },

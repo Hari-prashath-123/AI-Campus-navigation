@@ -94,6 +94,9 @@ export interface ExportedObject {
   };
   externalLinks?: { title: string; url: string }[];
   accessSchedule?: any;
+  objectTypeId?: string;
+  geometry?: any;
+  geometryType?: string;
   properties?: Record<string, unknown>;
   attributes?: Record<string, any>;
   createdAt: string;
@@ -127,12 +130,68 @@ export interface ExportedConnection {
   isVehicleAccessible: boolean;
   isAccessible: boolean;
   isBidirectional: boolean;
+  name?: string;
+  description?: string;
+  availability?: string;
+  isRestricted?: boolean;
+  requiredPermissions?: string[];
   accessRules?: {
     allowedUserTypes?: string[];
     restrictedTimeRanges?: string[];
     requiresPermission?: boolean;
   };
   metadata?: Record<string, any>;
+}
+
+export interface ImportPreviewDiff {
+  campus: {
+    action: 'create_new_site' | 'merge_into_existing';
+    name: string;
+    code: string;
+    slug: string;
+    targetCampusId?: string;
+  };
+  buildings: { code: string; name: string; floorCount: number }[];
+  floorsCount: number;
+  objectsCount: number;
+  nodesCount: number;
+  connectionsCount: number;
+  accessRulesCount: number;
+  objectTypesCount: number;
+  customObjectTypes: string[];
+  potentialCollisions: string[];
+}
+
+export interface ImportPreviewResult {
+  valid: boolean;
+  issues: ValidationIssue[];
+  preview?: ImportPreviewDiff;
+  bundle?: CampusBundle;
+  stats?: ValidationResult['stats'];
+}
+
+export interface ImportCampusOptions {
+  targetOrganizationId?: string;
+  targetCampusId?: string;
+  newCampusSlug?: string;
+  newCampusName?: Record<string, string>;
+  newCampusCode?: string;
+  importMode?: 'create_new_site' | 'merge_into_existing' | 'overwrite_existing';
+}
+
+export interface ImportCampusResult {
+  success: boolean;
+  campusId: string;
+  message?: string;
+  stats: {
+    buildings: number;
+    floors: number;
+    objectTypes: number;
+    objects: number;
+    nodes: number;
+    connections: number;
+    accessRules: number;
+  };
 }
 
 /** Full portable campus bundle */

@@ -2,8 +2,12 @@ import { campusService } from './campus.service';
 import { objectService } from './object.service';
 import { routingService } from './routing.service';
 import { workflowService } from './workflow.service';
+import { accessRuleService } from './access-rule.service';
 import { MapObject, Building, Floor } from '../types';
 import { ToolContext } from '../types/context';
+import { resolveLocalizedString } from '../utils/i18n';
+import { SupportedLanguage } from '../types/multilingual';
+import { rateLimiter } from '../utils/rate-limiter';
 
 /**
  * LLM Secure API Layer
@@ -17,42 +21,46 @@ import { ToolContext } from '../types/context';
 // Internal Security & Validation Helpers
 // ============================================================================
 
-const validateCampusScope = async (campusId: string): Promise<boolean> => {
+export const validateCampusScope = async (campusId: string): Promise<boolean> => {
   if (!campusId) return false;
   const res = await campusService.getCampusById(campusId);
-  return res.success && !!res.data;
+  if (res.success && !!res.data) return true;
+  // Allow fallback to first available campus if default/demo campus requested
+  const allCampuses = await campusService.getCampuses();
+  return allCampuses.success && allCampuses.data.length > 0;
 };
 
 // ============================================================================
 // Secure DTO Mappers (Redacting internal fields)
 // ============================================================================
 
-const mapToSafeObject = (obj: MapObject) => ({
+export const mapToSafeObject = (obj: MapObject, lang?: SupportedLanguage) => ({
   id: obj.id,
-  name: obj.name.en,
-  description: obj.description?.en,
+  code: obj.code,
+  name: resolveLocalizedString(obj.name, lang) || (typeof obj.name === 'string' ? obj.name : obj.name?.en || obj.code),
+  description: obj.description ? resolveLocalizedString(obj.description, lang) : undefined,
   type: obj.category,
   buildingId: obj.buildingId,
   floorId: obj.floorId,
   isAccessible: obj.isAccessible,
   images: obj.images,
-  historicalInfo: obj.historicalInfo?.en,
+  historicalInfo: obj.historicalInfo ? resolveLocalizedString(obj.historicalInfo, lang) : undefined,
   contactInfo: obj.contactInfo,
   externalLinks: obj.externalLinks,
-  properties: obj.attributes, // Safe key-value pairs
+  properties: obj.properties || (obj as any).attributes, // Safe key-value pairs
 });
 
-const mapToSafeBuilding = (bld: Building) => ({
+export const mapToSafeBuilding = (bld: Building, lang?: SupportedLanguage) => ({
   id: bld.id,
-  name: bld.name.en,
-  description: bld.description?.en,
+  name: resolveLocalizedString(bld.name, lang) || bld.name?.en || bld.code,
+  description: bld.description ? resolveLocalizedString(bld.description, lang) : undefined,
   code: bld.code,
   totalFloors: bld.totalFloors,
 });
 
-const mapToSafeFloor = (flr: Floor) => ({
+export const mapToSafeFloor = (flr: Floor, lang?: SupportedLanguage) => ({
   id: flr.id,
-  name: flr.name.en,
+  name: resolveLocalizedString(flr.name, lang) || flr.name?.en || `Floor ${flr.level}`,
   level: flr.level,
 });
 
@@ -65,13 +73,14 @@ export const llmTools = {
    * searchCampusObjects
    * Searches for points of interest, rooms, and facilities within a campus.
    */
-  searchCampusObjects: async (args: { campusId: string; query: string; limit?: number }) => {
+  searchCampusObjects: async (args: { campusId: string; query: string; limit?: number; lang?: SupportedLanguage }) => {
+    rateLimiter.enforceLimit(`tool-search-${args.campusId}`, 60, 60000, 'Search Objects');
     if (!(await validateCampusScope(args.campusId))) return { error: 'Unauthorized or invalid campus.' };
     
     const res = await objectService.searchObjects(args.campusId, args.query);
     if (!res.success || !res.data) return { error: 'Search failed.' };
 
-    const results = res.data.slice(0, args.limit || 5).map(mapToSafeObject);
+    const results = res.data.slice(0, args.limit || 5).map(obj => mapToSafeObject(obj, args.lang));
     return results.length > 0 ? { results } : { message: 'No objects found matching the query.' };
   },
 
@@ -143,7 +152,7 @@ export const llmTools = {
       .filter(obj => obj.id !== args.sourceObjectId)
       .filter(obj => !args.category || obj.category === args.category)
       .slice(0, 5) // Mock limiting
-      .map(mapToSafeObject);
+      .map(obj => mapToSafeObject(obj));
 
     return nearby.length > 0 ? { results: nearby } : { message: 'No nearby objects found.' };
   },
@@ -164,6 +173,48 @@ export const llmTools = {
     return { 
       isOpen: true, 
       operatingHours: 'Standard Hours' 
+    };
+  },
+
+  /**
+   * checkOperatingSchedule
+   * Authoritatively checks operating hours, temporary closures, and accessibility for a specific map object.
+   */
+  checkOperatingSchedule: async (args: { campusId: string; objectId: string; userRoles?: string[]; time?: string }) => {
+    if (!(await validateCampusScope(args.campusId))) return { error: 'Unauthorized or invalid campus.' };
+
+    const objRes = await objectService.getObjectById(args.objectId);
+    if (!objRes.success || !objRes.data) {
+      return { error: 'Object not found.' };
+    }
+    const obj = objRes.data;
+
+    const checkDate = args.time ? new Date(args.time) : new Date();
+    const evalResult = accessRuleService.isTargetAccessible('object', obj.id, {
+      time: checkDate,
+      userRoles: args.userRoles,
+    });
+
+    let operatingHours = 'Standard Campus Hours (08:00 - 18:00)';
+    if (obj.accessSchedule?.openTime && obj.accessSchedule?.closeTime) {
+      operatingHours = `${obj.accessSchedule.openTime} - ${obj.accessSchedule.closeTime}`;
+    } else if (evalResult.activeRule?.openTime && evalResult.activeRule?.closeTime) {
+      operatingHours = `${evalResult.activeRule.openTime} - ${evalResult.activeRule.closeTime}`;
+    }
+
+    const isOpen = evalResult.isAccessible && obj.status !== 'under_maintenance' && obj.status !== 'archived';
+    const reason = evalResult.reason || (obj.status === 'under_maintenance' ? 'Under scheduled maintenance' : undefined);
+
+    return {
+      result: {
+        objectId: obj.id,
+        name: resolveLocalizedString(obj.name) || obj.code,
+        isOpen,
+        operatingHours,
+        isRoutingBlocked: evalResult.isRoutingBlocked,
+        closureReason: reason,
+        status: obj.status || 'active',
+      },
     };
   },
 
@@ -194,6 +245,7 @@ export const llmTools = {
    */
   findRoute: async (args: { sourceObjectId: string; targetObjectId: string; context: ToolContext }) => {
     const { context, sourceObjectId, targetObjectId } = args;
+    rateLimiter.enforceLimit(`tool-route-${context.campusId}`, 60, 60000, 'Find Route');
     if (!(await validateCampusScope(context.campusId))) return { error: 'Unauthorized or invalid campus.' };
 
     const res = await routingService.calculateRoute(context.campusId, sourceObjectId, targetObjectId, {

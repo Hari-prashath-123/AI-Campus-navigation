@@ -85,18 +85,22 @@ const INTENT_KEYWORDS: Record<
  */
 const STRIP_PATTERNS: Record<SupportedLanguage, RegExp[]> = {
   en: [
-    /^(where is|find|show me|locate|navigate to|how to get to|take me to|route to|nearest|closest|is the|is|are the|find an? accessible route to|find an? route to)/i,
+    /^(where is|find|show me|locate|navigate to|how to get to|take me to|route to|nearest|closest|is the|is|are the|are|find an? accessible route to|find an? route to|check if the|check if)/i,
+    /\?+$/,
+    /(please|now|open|closed|currently open|currently closed|operating hours|hours)$/i,
     /\?+$/,
   ],
   ta: [
-    /^(எங்கே|எங்கு|எங்கிருக்கு|கண்டுபிடி|காட்டு|அருகில்|பக்கத்தில்|திறந்திருக்கா)/i,
+    /^(எங்கே|எங்கு|எங்கிருக்கு|கண்டுபிடி|காட்டு|அருகில்|பக்கத்தில்|திறந்திருக்கா|எப்படி போவது)/i,
     /\?+$/,
-    /(எங்கே இருக்கு|இருக்கு|எங்க|போக|செல்ல)$/i,
+    /(எங்கே இருக்கு|எங்கிருக்கு|எங்கே|எங்கு|இருக்கு|எங்க|போக|செல்ல|எப்படி போவது|வழி காட்டு|பாதை காட்டு|செல்ல வழி|வழி|திறந்திருக்கா|மூடியிருக்கா|திறந்ததா|நேரம்)$/i,
+    /\?+$/,
   ],
   hi: [
-    /^(कहाँ है|ढूंढो|खोजें|दिखाओ|बताओ|कैसे जाएं|रास्ता दिखाओ|नजदीकी)/i,
+    /^(कहाँ है|ढूंढो|खोजें|दिखाओ|बताओ|कैसे जाएं|रास्ता दिखाओ|नजदीकी|क्या|बताइए)/i,
     /\?+$/,
-    /(कहाँ|है|हैं)$/i,
+    /(कहाँ है|कहाँ|है|हैं|कैसे जाएं|तक का मार्ग|का मार्ग|मार्ग बताएं|रास्ता बताएं|खुला है|बंद है|का समय|समय)$/i,
+    /\?+$/,
   ],
 };
 
@@ -105,6 +109,13 @@ function extractEntity(text: string, lang: SupportedLanguage): string {
   for (const pattern of STRIP_PATTERNS[lang]) {
     result = result.replace(pattern, '').trim();
   }
+  // Strip leading articles (e.g. "the lab" -> "lab")
+  result = result.replace(/^(the|a|an)\s+/i, '').trim();
+  // Run once more in case multiple affixes existed (e.g. "open?")
+  for (const pattern of STRIP_PATTERNS[lang]) {
+    result = result.replace(pattern, '').trim();
+  }
+  result = result.replace(/^(the|a|an)\s+/i, '').trim();
   return result || text.trim();
 }
 
@@ -115,9 +126,9 @@ function matchesAny(text: string, keywords: string[]): boolean {
 // ─── Route entity extraction (source → dest) ─────────────────────────────────
 
 const FROM_TO_PATTERNS: Record<SupportedLanguage, RegExp> = {
-  en: /from\s+(.+?)\s+to\s+(.+)/i,
-  ta: /(.+?)\s+இலிருந்து\s+(.+?)\s+(செல்ல|போக|வழி)/i,
-  hi: /(.+?)\s+से\s+(.+?)\s+(जाना|मार्ग|रास्ता)/i,
+  en: /(?:from\s+)(.+?)\s+(?:to|towards)\s+(.+)/i,
+  ta: /(.+?)\s+இலிருந்து\s+(.+?)\s*(?:வரை)?\s*(?:செல்ல|போக|வழி|பாதை|காட்டு|$)/i,
+  hi: /(.+?)\s+से\s+(.+?)\s*(?:तक)?\s*(?:जाना|मार्ग|रास्ता|नेविगेट|बताएं|दिखाओ|$)/i,
 };
 
 // ─── Main Parser ─────────────────────────────────────────────────────────────
@@ -152,9 +163,10 @@ export function parseIntent(userText: string): ParsedIntent {
     }
     // No explicit source — default to entrance/gate
     const dest = extractEntity(userText, lang);
+    const defaultEntrance = lang === 'ta' ? 'முதன்மை நுழைவாயில்' : (lang === 'hi' ? 'मुख्य प्रवेश द्वार' : 'entrance');
     return {
       type: 'find_route',
-      entities: { source: 'main entrance', destination: dest },
+      entities: { source: defaultEntrance, destination: dest },
       isAccessible,
       detectedLanguage: lang,
       mode,

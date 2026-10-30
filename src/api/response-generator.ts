@@ -1,4 +1,4 @@
-import { SupportedLanguage, SafePOI } from '../types/ai';
+import { SupportedLanguage, SafePOI, ClarificationOption } from '../types/ai';
 import { WorkflowResolution } from '../types/workflow';
 
 /**
@@ -30,19 +30,21 @@ const T = {
       `Here is the ${accessible ? 'wheelchair-accessible ' : ''}route from **${s}** to **${d}**:`,
     distance: (m: number) => `• **Distance:** ${m.toFixed(0)} m`,
     time: (s: number) => `• **Estimated time:** ${Math.ceil(s / 60)} min`,
-    transitions: 'Key transitions:',
+    transitions: 'Key transitions & Floor changes:',
     noRoute: (s: string, d: string) =>
       `I found **${s}** and **${d}** in the database, but there is no mapped route between them. Try checking connections first.`,
     found: (q: string, n: number) =>
       `I found ${n} result${n === 1 ? '' : 's'} for **"${q}"**:`,
     accessible: (v: boolean) => (v ? 'Yes ♿' : 'No'),
-    openStatus: (name: string, open: boolean, hours: string) =>
-      `**${name}** is currently **${open ? '🟢 Open' : '🔴 Closed'}**. Operating hours: ${hours}.`,
+    openStatus: (name: string, open: boolean, hours: string, reason?: string) =>
+      `**${name}** is currently **${open ? '🟢 Open' : '🔴 Closed'}**. Operating hours: ${hours}.${reason ? ` (${reason})` : ''}`,
     noAvailability: (q: string) =>
       `I couldn't determine the availability of **"${q}"** from the database.`,
     typeLabel: 'Type',
     accessLabel: 'Accessible',
     workflowFound: (name: string, desc: string) => `Here is the procedure for **${name}**:\n_${desc}_\n\n**Steps:**`,
+    ambiguityQuestion: (q: string) =>
+      `I found multiple locations matching **"${q}"**. Which one did you mean?`,
   },
   ta: {
     notFound: (q: string) =>
@@ -51,19 +53,21 @@ const T = {
       `**${s}** இலிருந்து **${d}** வரை ${accessible ? 'வீல்சேர் அணுகக்கூடிய ' : ''}பாதை:`,
     distance: (m: number) => `• **தூரம்:** ${m.toFixed(0)} மீ`,
     time: (s: number) => `• **மதிப்பிடப்பட்ட நேரம்:** ${Math.ceil(s / 60)} நிமிடம்`,
-    transitions: 'முக்கிய மாற்றங்கள்:',
+    transitions: 'முக்கிய மாற்றங்கள் & தள மாற்றங்கள்:',
     noRoute: (s: string, d: string) =>
       `தரவுத்தளத்தில் **${s}** மற்றும் **${d}** உள்ளன, ஆனால் இடையே பாதை இல்லை. இணைப்புகளை சரிபார்க்கவும்.`,
     found: (q: string, n: number) =>
       `**"${q}"** க்கு ${n} முடிவு${n === 1 ? '' : 'கள்'} கண்டறியப்பட்டன:`,
     accessible: (v: boolean) => (v ? 'ஆம் ♿' : 'இல்லை'),
-    openStatus: (name: string, open: boolean, hours: string) =>
-      `**${name}** இப்போது **${open ? '🟢 திறந்திருக்கிறது' : '🔴 மூடப்பட்டுள்ளது'}**. நேரம்: ${hours}.`,
+    openStatus: (name: string, open: boolean, hours: string, reason?: string) =>
+      `**${name}** இப்போது **${open ? '🟢 திறந்திருக்கிறது' : '🔴 மூடப்பட்டுள்ளது'}**. நேரம்: ${hours}.${reason ? ` (${reason})` : ''}`,
     noAvailability: (q: string) =>
       `**"${q}"** இன் நிலையை தரவுத்தளத்தில் கண்டறிய முடியவில்லை.`,
     typeLabel: 'வகை',
     accessLabel: 'அணுகல்',
     workflowFound: (name: string, desc: string) => `**${name}** க்கான நடைமுறை இதோ:\n_${desc}_\n\n**படிககள்:**`,
+    ambiguityQuestion: (q: string) =>
+      `**"${q}"** உடன் பொருந்தும் பல இடங்கள் உள்ளன. நீங்கள் எதை குறிப்பிட்டீர்கள்?`,
   },
   hi: {
     notFound: (q: string) =>
@@ -72,19 +76,21 @@ const T = {
       `**${s}** से **${d}** तक का ${accessible ? 'व्हीलचेयर सुलभ ' : ''}मार्ग:`,
     distance: (m: number) => `• **दूरी:** ${m.toFixed(0)} मी`,
     time: (s: number) => `• **अनुमानित समय:** ${Math.ceil(s / 60)} मिनट`,
-    transitions: 'मुख्य बदलाव:',
+    transitions: 'मुख्य बदलाव और मंजिल परिवर्तन:',
     noRoute: (s: string, d: string) =>
       `डेटाबेस में **${s}** और **${d}** दोनों हैं, लेकिन उनके बीच कोई मार्ग नहीं है। कनेक्शन जाँचें।`,
     found: (q: string, n: number) =>
       `**"${q}"** के लिए ${n} परिणाम मिले:`,
     accessible: (v: boolean) => (v ? 'हाँ ♿' : 'नहीं'),
-    openStatus: (name: string, open: boolean, hours: string) =>
-      `**${name}** अभी **${open ? '🟢 खुला है' : '🔴 बंद है'}**। समय: ${hours}.`,
+    openStatus: (name: string, open: boolean, hours: string, reason?: string) =>
+      `**${name}** अभी **${open ? '🟢 खुला है' : '🔴 बंद है'}**। समय: ${hours}.${reason ? ` (${reason})` : ''}`,
     noAvailability: (q: string) =>
       `**"${q}"** की उपलब्धता डेटाबेस में नहीं मिली।`,
     typeLabel: 'प्रकार',
     accessLabel: 'सुलभ',
     workflowFound: (name: string, desc: string) => `**${name}** के लिए प्रक्रिया यहाँ है:\n_${desc}_\n\n**कदम:**`,
+    ambiguityQuestion: (q: string) =>
+      `**"${q}"** से मेल खाने वाले कई स्थान मिले। आपका क्या मतलब था?`,
   },
 };
 
@@ -92,33 +98,33 @@ const T = {
 
 const TRANSITION_LABELS: Record<SupportedLanguage, Record<string, string>> = {
   en: {
-    staircase: 'Take the stairs',
-    elevator: 'Take the elevator',
-    ramp: 'Use the ramp',
-    bridge: 'Cross the bridge',
-    entrance: 'Enter through the entrance',
-    door: 'Go through the door',
-    building_to_building: 'Move to another building',
-    corridor: 'Walk through corridor',
+    staircase: 'Take the stairs (⚠️ Note: Not wheelchair accessible)',
+    elevator: 'Take the elevator (♿ Wheelchair accessible)',
+    ramp: 'Use the access ramp (♿ Wheelchair accessible)',
+    bridge: 'Cross the connecting bridge',
+    entrance: 'Enter through the doorway',
+    door: 'Pass through the entrance',
+    building_to_building: 'Proceed outside between buildings',
+    corridor: 'Walk along the corridor',
   },
   ta: {
-    staircase: 'படிகளில் ஏறவும்',
-    elevator: 'லிஃப்ட் பயன்படுத்தவும்',
-    ramp: 'சாய்வுப்பாதை பயன்படுத்தவும்',
-    bridge: 'பாலத்தை கடக்கவும்',
+    staircase: 'படிகளில் ஏறவும் (⚠️ குறிப்பு: வீல்சேர் செல்ல முடியாது)',
+    elevator: 'லிஃப்ட் பயன்படுத்தவும் (♿ வீல்சேர் அணுகக்கூடியது)',
+    ramp: 'சாய்வுப்பாதை பயன்படுத்தவும் (♿ வீல்சேர் அணுகக்கூடியது)',
+    bridge: 'இணைப்பு பாலத்தை கடக்கவும்',
     entrance: 'நுழைவாயில் வழியாக நுழைக',
     door: 'கதவு வழியாக செல்லவும்',
-    building_to_building: 'மற்றொரு கட்டிடத்திற்கு செல்லவும்',
+    building_to_building: 'கட்டிடங்களுக்கு இடையே வெளியில் செல்லவும்',
     corridor: 'தாழ்வாரம் வழியாக நடக்கவும்',
   },
   hi: {
-    staircase: 'सीढ़ियाँ लें',
-    elevator: 'लिफ्ट लें',
-    ramp: 'रैंप का उपयोग करें',
-    bridge: 'पुल पार करें',
+    staircase: 'सीढ़ियाँ लें (⚠️ ध्यान दें: व्हीलचेयर सुलभ नहीं है)',
+    elevator: 'लिफ्ट लें (♿ व्हीलचेयर सुलभ)',
+    ramp: 'रैंप का उपयोग करें (♿ व्हीलचेयर सुलभ)',
+    bridge: 'कनेक्टिंग पुल पार करें',
     entrance: 'प्रवेश द्वार से जाएं',
     door: 'दरवाजे से जाएं',
-    building_to_building: 'दूसरी बिल्डिंग में जाएं',
+    building_to_building: 'इमारतों के बीच बाहर जाएं',
     corridor: 'गलियारे से चलें',
   },
 };
@@ -127,6 +133,20 @@ const TRANSITION_LABELS: Record<SupportedLanguage, Record<string, string>> = {
 
 export function generateNotFound(query: string, lang: SupportedLanguage): string {
   return T[lang].notFound(query);
+}
+
+export function generateAmbiguityClarification(
+  query: string,
+  options: ClarificationOption[],
+  lang: SupportedLanguage
+): string {
+  const t = T[lang];
+  const lines: string[] = [t.ambiguityQuestion(query), ''];
+  options.forEach((opt, idx) => {
+    const loc = opt.buildingName ? ` (${opt.buildingName}${opt.floorLevel !== undefined ? `, Floor ${opt.floorLevel}` : ''})` : '';
+    lines.push(`${idx + 1}. **${opt.label}**${loc}`);
+  });
+  return lines.join('\n');
 }
 
 export function generateRouteResponse(
@@ -196,9 +216,10 @@ export function generateAvailabilityResponse(
   name: string,
   isOpen: boolean,
   operatingHours: string,
-  lang: SupportedLanguage
+  lang: SupportedLanguage,
+  closureReason?: string
 ): string {
-  return T[lang].openStatus(name, isOpen, operatingHours);
+  return T[lang].openStatus(name, isOpen, operatingHours, closureReason);
 }
 
 export function generateNoAvailability(query: string, lang: SupportedLanguage): string {

@@ -4,46 +4,39 @@ import {
   CAMPUS_BUNDLE_SCHEMA_VERSION,
   ValidationResult,
   ValidationIssue,
+  ImportCampusOptions,
+  ImportCampusResult,
+  ImportPreviewResult,
+  ImportPreviewDiff,
 } from '../types/import-export';
 import { campusService } from './campus.service';
 import { objectStore } from './object.store';
 import { objectTypeService } from './object-type.service';
 import { navStore } from './nav.store';
 import { accessRuleService } from './access-rule.service';
+import { authGuard } from './auth-guard';
+import { auditService } from './audit.service';
+import { securityValidation } from '../utils/security-validation';
+import { transactionService } from './transaction.service';
+import { ValidationError } from '../utils/errors';
 import { v4 as uuidv4 } from 'uuid';
 
-export interface ImportCampusOptions {
-  targetOrganizationId?: string;
-  newCampusSlug?: string;
-  newCampusName?: Record<string, string>;
-  newCampusCode?: string;
-  importMode?: 'create_new_site' | 'overwrite_existing';
-}
+export type { ImportCampusOptions, ImportCampusResult };
 
-export interface ImportCampusResult {
-  success: boolean;
-  campusId: string;
-  message?: string;
-  stats: {
-    buildings: number;
-    floors: number;
-    objectTypes: number;
-    objects: number;
-    nodes: number;
-    connections: number;
-    accessRules: number;
-  };
-}
+const MAX_IMPORT_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
 
 /**
  * CampusImportExportService
  *
- * Handles full campus export to JSON and import with schema validation and multi-tenant data isolation.
+ * Handles full campus export to JSON and import with schema validation,
+ * preview diffing, and multi-tenant data isolation.
  *
  * Safety rules:
  *  - NEVER exports credentials, auth tokens, or user passwords.
- *  - Export is fully self-contained and portable.
- *  - Import validates schema, detects duplicates, verifies cross-references, and isolates IDs.
+ *  - Export is fully self-contained and portable, including complete geometry,
+ *    object types, floor transitions, and graph connections.
+ *  - Import validates schema, detects duplicates, verifies geometry/cross-references, and isolates IDs.
+ *  - Uses transactionService to ensure failed imports leave state 100% untouched.
  */
 export class CampusImportExportService {
   private static instance: CampusImportExportService;
@@ -63,6 +56,7 @@ export class CampusImportExportService {
    * Does NOT include any auth data, user accounts, or private credentials.
    */
   public async exportCampus(campusId: string): Promise<CampusBundle> {
+    const user = await authGuard.enforce('export', 'campus', { campusId });
     const campusRes = await campusService.getCampusById(campusId);
     if (!campusRes.success || !campusRes.data) throw new Error('Campus not found.');
 
@@ -157,6 +151,9 @@ export class CampusImportExportService {
         name: o.name as Record<string, string>,
         description: o.description as Record<string, string> | undefined,
         category: o.category,
+        objectTypeId: o.objectTypeId,
+        geometry: o.geometry,
+        geometryType: o.geometryType as any,
         coordinates: o.coordinates,
         associatedNodeId: o.associatedNodeId,
         entranceNodeIds: o.entranceNodeIds,
@@ -195,16 +192,32 @@ export class CampusImportExportService {
         sourceBuildingId: c.sourceBuildingId || '',
         targetBuildingId: c.targetBuildingId || '',
         connectionType: c.connectionType,
+        name: c.name,
+        description: c.description,
         distanceMeters: c.distanceMeters,
         weightMultiplier: c.weightMultiplier,
         isWalkable: c.isWalkable,
         isVehicleAccessible: c.isVehicleAccessible,
         isAccessible: c.isAccessible,
         isBidirectional: c.isBidirectional,
+        availability: c.availability,
+        isRestricted: c.isRestricted,
+        requiredPermissions: c.requiredPermissions,
         metadata: { name: c.name, description: c.description },
       })),
       accessRules,
     };
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'EXPORT',
+      resourceType: 'campus',
+      resourceId: campusId,
+      campusId: campusId,
+      status: 'SUCCESS',
+    });
 
     return bundle;
   }
@@ -228,12 +241,12 @@ export class CampusImportExportService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // VALIDATION
+  // VALIDATION & PREVIEW
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * Validate a CampusBundle JSON before import.
-   * Returns a structured ValidationResult with all issues.
+   * Checks schema version, geometry integrity, coordinates, and cross-references.
    */
   public validate(raw: unknown): ValidationResult {
     const issues: ValidationIssue[] = [];
@@ -244,7 +257,7 @@ export class CampusImportExportService {
     }
     const bundle = raw as Record<string, any>;
 
-    // 2. Schema version
+    // 2. Schema version check
     const meta = bundle['_meta'];
     if (!meta || typeof meta !== 'object') {
       issues.push({ severity: 'error', code: 'MISSING_META', message: 'Missing _meta block.', path: '_meta' });
@@ -252,6 +265,13 @@ export class CampusImportExportService {
       const version = meta['schemaVersion'];
       if (typeof version !== 'number' || version < 1) {
         issues.push({ severity: 'error', code: 'INVALID_VERSION', message: `Invalid schemaVersion: "${version}".`, path: '_meta.schemaVersion' });
+      } else if (version !== CAMPUS_BUNDLE_SCHEMA_VERSION) {
+        issues.push({
+          severity: 'error',
+          code: 'UNSUPPORTED_SCHEMA_VERSION',
+          message: `Unsupported schemaVersion: "${version}". Supported versions: [${CAMPUS_BUNDLE_SCHEMA_VERSION}].`,
+          path: '_meta.schemaVersion',
+        });
       }
     }
 
@@ -313,10 +333,79 @@ export class CampusImportExportService {
         if (!n.id) { issues.push({ severity: 'error', code: 'MISSING_ID', message: `nodes[${i}] has no id.` }); continue; }
         addId(n.id, `nodes[${i}].id`);
         nodeIds.add(n.id);
+
+        if (n.buildingId && !buildingIds.has(n.buildingId)) {
+          issues.push({ severity: 'warning', code: 'INVALID_REF', message: `nodes[${i}].buildingId "${n.buildingId}" not found in buildings.`, path: `nodes[${i}].buildingId` });
+        }
+        if (n.floorId && !floorIds.has(n.floorId)) {
+          issues.push({ severity: 'warning', code: 'INVALID_REF', message: `nodes[${i}].floorId "${n.floorId}" not found in floors.`, path: `nodes[${i}].floorId` });
+        }
+
+        if (n.coordinates) {
+          try {
+            securityValidation.validateCoordinates(n.coordinates);
+          } catch (err: any) {
+            issues.push({ severity: 'error', code: 'INVALID_COORDINATES', message: `nodes[${i}].coordinates: ${err.message}`, path: `nodes[${i}].coordinates` });
+          }
+        }
       }
     }
 
-    // 8. Connections
+    // 8. Objects
+    const objectIds = new Set<string>();
+    if (Array.isArray(bundle['objects'])) {
+      for (const [i, o] of (bundle['objects'] as any[]).entries()) {
+        if (!o.id) { issues.push({ severity: 'error', code: 'MISSING_ID', message: `objects[${i}] has no id.` }); continue; }
+        addId(o.id, `objects[${i}].id`);
+        objectIds.add(o.id);
+
+        if (o.buildingId && !buildingIds.has(o.buildingId)) {
+          issues.push({ severity: 'error', code: 'INVALID_REF', message: `objects[${i}].buildingId "${o.buildingId}" not found in buildings.`, path: `objects[${i}].buildingId` });
+        }
+        if (o.floorId && !floorIds.has(o.floorId)) {
+          issues.push({ severity: 'error', code: 'INVALID_REF', message: `objects[${i}].floorId "${o.floorId}" not found in floors.`, path: `objects[${i}].floorId` });
+        }
+        if (o.associatedNodeId && !nodeIds.has(o.associatedNodeId)) {
+          issues.push({ severity: 'error', code: 'INVALID_REF', message: `objects[${i}].associatedNodeId "${o.associatedNodeId}" not found in nodes.`, path: `objects[${i}].associatedNodeId` });
+        }
+        if (Array.isArray(o.entranceNodeIds)) {
+          for (const eid of o.entranceNodeIds) {
+            if (!nodeIds.has(eid)) {
+              issues.push({ severity: 'error', code: 'INVALID_REF', message: `objects[${i}].entranceNodeIds contains unknown node "${eid}".`, path: `objects[${i}].entranceNodeIds` });
+            }
+          }
+        }
+
+        // Coordinate validation
+        if (o.coordinates) {
+          try {
+            securityValidation.validateCoordinates(o.coordinates);
+          } catch (err: any) {
+            issues.push({ severity: 'error', code: 'INVALID_COORDINATES', message: `objects[${i}].coordinates: ${err.message}`, path: `objects[${i}].coordinates` });
+          }
+        }
+
+        // Geometry validation
+        if (o.geometry) {
+          try {
+            securityValidation.validateGeoJson(o.geometry);
+          } catch (err: any) {
+            issues.push({ severity: 'error', code: 'MALFORMED_GEOMETRY', message: `objects[${i}].geometry: ${err.message}`, path: `objects[${i}].geometry` });
+          }
+        }
+      }
+    }
+
+    // 9. Parent object self-references check
+    if (Array.isArray(bundle['objects'])) {
+      for (const [i, o] of (bundle['objects'] as any[]).entries()) {
+        if (o.parentObjectId && !objectIds.has(o.parentObjectId)) {
+          issues.push({ severity: 'warning', code: 'INVALID_REF', message: `objects[${i}].parentObjectId "${o.parentObjectId}" not found in objects array.`, path: `objects[${i}].parentObjectId` });
+        }
+      }
+    }
+
+    // 10. Connections
     if (Array.isArray(bundle['connections'])) {
       for (const [i, c] of (bundle['connections'] as any[]).entries()) {
         if (!c.id) { issues.push({ severity: 'error', code: 'MISSING_ID', message: `connections[${i}] has no id.` }); continue; }
@@ -353,14 +442,21 @@ export class CampusImportExportService {
     };
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // IMPORT
-  // ─────────────────────────────────────────────────────────────────────────────
-
   /**
    * Parse a JSON string, validate it, and return the bundle.
    */
   public parseAndValidate(jsonText: string): { bundle: CampusBundle | null; validation: ValidationResult } {
+    if (typeof jsonText === 'string' && jsonText.length > MAX_IMPORT_SIZE_BYTES) {
+      return {
+        bundle: null,
+        validation: this.failResult([{
+          severity: 'error',
+          code: 'FILE_TOO_LARGE',
+          message: `File size exceeds maximum permitted import limit of ${(MAX_IMPORT_SIZE_BYTES / (1024 * 1024)).toFixed(0)}MB.`,
+        }]),
+      };
+    }
+
     let parsed: unknown;
     try {
       parsed = JSON.parse(jsonText);
@@ -379,246 +475,412 @@ export class CampusImportExportService {
   }
 
   /**
+   * Provides a preview and detailed validation diff before committing an import.
+   */
+  public async previewImport(
+    rawInput: string | unknown,
+    options: ImportCampusOptions = {}
+  ): Promise<ImportPreviewResult> {
+    let bundle: CampusBundle | null = null;
+    let validation: ValidationResult;
+
+    if (typeof rawInput === 'string') {
+      const pv = this.parseAndValidate(rawInput);
+      bundle = pv.bundle;
+      validation = pv.validation;
+    } else {
+      validation = this.validate(rawInput);
+      if (validation.valid) {
+        bundle = rawInput as CampusBundle;
+      }
+    }
+
+    if (!validation.valid || !bundle) {
+      return {
+        valid: false,
+        issues: validation.issues,
+        stats: validation.stats,
+      };
+    }
+
+    const mode = options.importMode || 'create_new_site';
+    const existingCampusesRes = await campusService.getCampuses();
+    const existingCampuses = existingCampusesRes.data || [];
+    const existingTypesRes = await objectTypeService.getAll();
+    const existingTypes = existingTypesRes.data || [];
+    const existingTypeSlugs = new Set(existingTypes.map(t => t.slug));
+
+    const customObjectTypes = (bundle.objectTypes || [])
+      .filter(ot => !existingTypeSlugs.has((ot as any).slug || ot.id))
+      .map(ot => ot.name || ot.id);
+
+    const potentialCollisions: string[] = [];
+
+    if (mode === 'create_new_site') {
+      const desiredSlug = options.newCampusSlug || bundle.campus.slug;
+      if (existingCampuses.some(c => c.slug === desiredSlug)) {
+        potentialCollisions.push(`A campus with slug "${desiredSlug}" already exists. Fresh unique slug will be assigned.`);
+      }
+    } else if (mode === 'merge_into_existing') {
+      if (!options.targetCampusId) {
+        validation.issues.push({
+          severity: 'error',
+          code: 'MISSING_TARGET_CAMPUS',
+          message: 'A targetCampusId is required when importMode is "merge_into_existing".',
+        });
+        return { valid: false, issues: validation.issues, stats: validation.stats };
+      }
+      const target = existingCampuses.find(c => c.id === options.targetCampusId);
+      if (!target) {
+        validation.issues.push({
+          severity: 'error',
+          code: 'TARGET_CAMPUS_NOT_FOUND',
+          message: `Target campus '${options.targetCampusId}' does not exist.`,
+        });
+        return { valid: false, issues: validation.issues, stats: validation.stats };
+      }
+    }
+
+    const previewDiff: ImportPreviewDiff = {
+      campus: {
+        action: mode === 'merge_into_existing' ? 'merge_into_existing' : 'create_new_site',
+        name: typeof bundle.campus.name === 'string' ? bundle.campus.name : (bundle.campus.name?.en || 'Imported Campus'),
+        code: options.newCampusCode || bundle.campus.code,
+        slug: options.newCampusSlug || bundle.campus.slug,
+        targetCampusId: options.targetCampusId,
+      },
+      buildings: (bundle.buildings || []).map(b => ({
+        code: b.code,
+        name: typeof b.name === 'string' ? b.name : (b.name?.en || b.code),
+        floorCount: (bundle.floors || []).filter(f => f.buildingId === b.id).length,
+      })),
+      floorsCount: bundle.floors?.length || 0,
+      objectsCount: bundle.objects?.length || 0,
+      nodesCount: bundle.nodes?.length || 0,
+      connectionsCount: bundle.connections?.length || 0,
+      accessRulesCount: bundle.accessRules?.length || 0,
+      objectTypesCount: bundle.objectTypes?.length || 0,
+      customObjectTypes,
+      potentialCollisions,
+    };
+
+    return {
+      valid: true,
+      issues: validation.issues,
+      preview: previewDiff,
+      bundle,
+      stats: validation.stats,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // IMPORT
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
    * Imports a CampusBundle into the system.
+   *
    * In 'create_new_site' mode (default), re-keys all entity IDs to completely isolate
-   * the imported site from any existing site in this or other instances.
+   * the imported site from any existing site.
+   * In 'merge_into_existing' mode, maps incoming buildings, floors, objects, and connections
+   * into an existing campus without overwriting existing entities.
+   *
+   * Wrapped in a transaction to guarantee atomic rollback if any error occurs.
    */
   public async importCampus(
     bundle: CampusBundle,
     options: ImportCampusOptions = {}
   ): Promise<ImportCampusResult> {
+    // 1. Strict validation prior to mutation
+    const validation = this.validate(bundle);
+    if (!validation.valid) {
+      const errorMsgs = validation.issues
+        .filter(i => i.severity === 'error')
+        .map(i => i.message)
+        .join('; ');
+      throw new ValidationError(`Import validation failed: ${errorMsgs}`);
+    }
+
     const migrated = this.migrate(bundle);
     const mode = options.importMode || 'create_new_site';
-
     const targetOrgId = options.targetOrganizationId || migrated.campus.organizationId || 'org-omnicampus';
-    const targetCampusId = mode === 'create_new_site' ? uuidv4() : migrated.campus.id;
-    const targetSlug = options.newCampusSlug || (mode === 'create_new_site' ? `${migrated.campus.slug}-copy-${Date.now().toString().slice(-4)}` : migrated.campus.slug);
-    const targetCode = options.newCampusCode || (mode === 'create_new_site' ? `${migrated.campus.code}-NEW` : migrated.campus.code);
-    const targetName = options.newCampusName || (mode === 'create_new_site'
-      ? { en: `${typeof migrated.campus.name === 'string' ? migrated.campus.name : (migrated.campus.name?.en || 'Imported Campus')} (Imported)` }
-      : migrated.campus.name
-    );
 
-    // ID translation maps
-    const buildingIdMap = new Map<string, string>();
-    const floorIdMap = new Map<string, string>();
-    const nodeIdMap = new Map<string, string>();
-    const objectIdMap = new Map<string, string>();
+    const user = await authGuard.enforce('import', 'campus', { organizationId: targetOrgId });
 
-    for (const b of migrated.buildings) {
-      buildingIdMap.set(b.id, mode === 'create_new_site' ? uuidv4() : b.id);
-    }
-    for (const f of migrated.floors) {
-      floorIdMap.set(f.id, mode === 'create_new_site' ? uuidv4() : f.id);
-    }
-    for (const n of migrated.nodes) {
-      nodeIdMap.set(n.id, mode === 'create_new_site' ? uuidv4() : n.id);
-    }
-    for (const o of migrated.objects) {
-      objectIdMap.set(o.id, mode === 'create_new_site' ? uuidv4() : o.id);
-    }
+    // 2. Execute import inside atomic transaction
+    return await transactionService.run('import-campus', async () => {
+      let targetCampusId: string;
 
-    // 1. Create Campus
-    await campusService.createCampus({
-      id: targetCampusId,
-      organizationId: targetOrgId,
-      slug: targetSlug,
-      code: targetCode,
-      name: targetName,
-      description: migrated.campus.description,
-      center: migrated.campus.center,
-      metadata: migrated.campus.metadata,
-    });
-
-    // 2. Create Buildings
-    for (const b of migrated.buildings) {
-      const newBldId = buildingIdMap.get(b.id)!;
-      await campusService.createBuilding({
-        id: newBldId,
-        campusId: targetCampusId,
-        code: b.code,
-        name: b.name,
-        description: b.description,
-        totalFloors: b.totalFloors,
-        entranceNodeIds: (b.entranceNodeIds || []).map(nid => nodeIdMap.get(nid) || nid),
-      });
-    }
-
-    // 3. Create Floors
-    for (const f of migrated.floors) {
-      const newFlrId = floorIdMap.get(f.id)!;
-      const mappedBldId = buildingIdMap.get(f.buildingId) || f.buildingId;
-      await campusService.createFloor({
-        id: newFlrId,
-        campusId: targetCampusId,
-        buildingId: mappedBldId,
-        level: f.level,
-        code: f.code,
-        name: f.name,
-        dimensions: f.dimensions,
-        planImageUrl: (f as any).planImageUrl,
-      });
-    }
-
-    // 4. Object Types
-    const existingTypesRes = await objectTypeService.getAll();
-    const existingTypeSlugs = new Set((existingTypesRes.data || []).map(t => t.slug));
-    let objectTypesImported = 0;
-
-    for (const ot of migrated.objectTypes) {
-      const slug = (ot as any).slug || ot.id;
-      if (!existingTypeSlugs.has(slug)) {
-        try {
-          await objectTypeService.create({
-            slug,
-            name: ot.name,
-            description: (ot as any).description || '',
-            category: ot.category as any,
-            iconName: ot.iconName,
-            color: ot.color,
-            isNavigable: ot.isWalkable ?? true,
-            isBarrier: false,
-            isConnector: false,
-            propertyDefinitions: ot.propertyDefinitions || [],
-          });
-          existingTypeSlugs.add(slug);
-          objectTypesImported++;
-        } catch {
-          // system or existing type already present
+      if (mode === 'merge_into_existing') {
+        if (!options.targetCampusId) {
+          throw new ValidationError('A targetCampusId is required when importMode is "merge_into_existing".');
         }
-      }
-    }
-
-    // 5. Objects
-    for (const o of migrated.objects) {
-      const newObjId = objectIdMap.get(o.id)!;
-      const mappedBldId = buildingIdMap.get(o.buildingId) || o.buildingId;
-      const mappedFlrId = floorIdMap.get(o.floorId) || o.floorId;
-      const mappedParentId = o.parentObjectId ? (objectIdMap.get(o.parentObjectId) || o.parentObjectId) : undefined;
-      const mappedAssocNode = o.associatedNodeId ? (nodeIdMap.get(o.associatedNodeId) || o.associatedNodeId) : '';
-      const mappedEntranceNodes = (o.entranceNodeIds || []).map((id: string) => nodeIdMap.get(id) || id);
-
-      objectStore.create({
-        id: newObjId,
-        campusId: targetCampusId,
-        buildingId: mappedBldId,
-        floorId: mappedFlrId,
-        code: o.code,
-        name: o.name,
-        description: o.description,
-        category: o.category,
-        coordinates: o.coordinates,
-        associatedNodeId: mappedAssocNode,
-        entranceNodeIds: mappedEntranceNodes,
-        isAccessible: o.isAccessible,
-        parentObjectId: mappedParentId,
-        subZoneType: o.subZoneType,
-        status: (o.status as any) || 'active',
-        tags: o.tags,
-        images: o.images,
-        historicalInfo: o.historicalInfo,
-        contactInfo: o.contactInfo,
-        externalLinks: o.externalLinks,
-        attributes: o.attributes,
-        properties: (o as any).properties,
-        accessSchedule: (o as any).accessSchedule,
-      });
-    }
-
-    // 6. Navigation Nodes
-    for (const n of migrated.nodes) {
-      const newNodeId = nodeIdMap.get(n.id)!;
-      const mappedBldId = buildingIdMap.get(n.buildingId) || n.buildingId;
-      const mappedFlrId = floorIdMap.get(n.floorId) || n.floorId;
-
-      navStore.createNode({
-        id: newNodeId,
-        campusId: targetCampusId,
-        buildingId: mappedBldId,
-        floorId: mappedFlrId,
-        type: n.type as any,
-        coordinates: n.coordinates,
-        isAccessible: n.isAccessible,
-        label: n.label,
-      });
-    }
-
-    // 7. Navigation Connections
-    for (const c of migrated.connections) {
-      const mappedSourceNode = nodeIdMap.get(c.sourceNodeId) || c.sourceNodeId;
-      const mappedTargetNode = nodeIdMap.get(c.targetNodeId) || c.targetNodeId;
-      const mappedSourceBld = c.sourceBuildingId ? (buildingIdMap.get(c.sourceBuildingId) || c.sourceBuildingId) : undefined;
-      const mappedTargetBld = c.targetBuildingId ? (buildingIdMap.get(c.targetBuildingId) || c.targetBuildingId) : undefined;
-      const mappedSourceFlr = c.sourceFloorId ? (floorIdMap.get(c.sourceFloorId) || c.sourceFloorId) : undefined;
-      const mappedTargetFlr = c.targetFloorId ? (floorIdMap.get(c.targetFloorId) || c.targetFloorId) : undefined;
-
-      navStore.createConnection({
-        id: uuidv4(),
-        campusId: targetCampusId,
-        sourceNodeId: mappedSourceNode,
-        targetNodeId: mappedTargetNode,
-        sourceBuildingId: mappedSourceBld,
-        targetBuildingId: mappedTargetBld,
-        sourceFloorId: mappedSourceFlr,
-        targetFloorId: mappedTargetFlr,
-        connectionType: c.connectionType as any,
-        name: c.metadata?.name || 'Imported Connection',
-        distanceMeters: c.distanceMeters,
-        weightMultiplier: c.weightMultiplier || 1.0,
-        isWalkable: c.isWalkable ?? true,
-        isVehicleAccessible: c.isVehicleAccessible ?? false,
-        isAccessible: c.isAccessible ?? true,
-        isBidirectional: c.isBidirectional ?? true,
-      });
-    }
-
-    // 8. Access Rules
-    let accessRulesImported = 0;
-    if (Array.isArray(migrated.accessRules)) {
-      for (const ar of migrated.accessRules) {
-        let mappedTargetId = ar.targetId;
-        if (ar.targetType === 'object') {
-          mappedTargetId = objectIdMap.get(ar.targetId) || ar.targetId;
-        } else if (ar.targetType === 'floor') {
-          mappedTargetId = floorIdMap.get(ar.targetId) || ar.targetId;
-        } else if (ar.targetType === 'building') {
-          mappedTargetId = buildingIdMap.get(ar.targetId) || ar.targetId;
+        const existingRes = await campusService.getCampusById(options.targetCampusId);
+        if (!existingRes.success || !existingRes.data) {
+          throw new ValidationError(`Target campus '${options.targetCampusId}' for merge not found.`);
         }
+        targetCampusId = options.targetCampusId;
+      } else {
+        // Create new site mode
+        targetCampusId = uuidv4();
+        const targetSlug = options.newCampusSlug || `${migrated.campus.slug}-copy-${Date.now().toString().slice(-4)}`;
+        const targetCode = options.newCampusCode || `${migrated.campus.code}-NEW`;
+        const targetName = options.newCampusName || (
+          typeof migrated.campus.name === 'string'
+            ? { en: `${migrated.campus.name} (Imported)` }
+            : { ...migrated.campus.name, en: `${migrated.campus.name?.en || 'Imported Campus'} (Imported)` }
+        );
 
-        await accessRuleService.createRule({
-          campusId: targetCampusId,
-          targetType: ar.targetType,
-          targetId: mappedTargetId,
-          ruleType: ar.ruleType,
-          name: ar.name,
-          description: ar.description,
-          validFrom: ar.validFrom,
-          validUntil: ar.validUntil,
-          activeDays: ar.activeDays,
-          openTime: ar.openTime,
-          closeTime: ar.closeTime,
-          allowedRoles: ar.allowedRoles,
-          isRoutingBlocked: ar.isRoutingBlocked,
-          closureReason: ar.closureReason,
+        await campusService.createCampus({
+          id: targetCampusId,
+          organizationId: targetOrgId,
+          slug: targetSlug,
+          code: targetCode,
+          name: targetName,
+          description: migrated.campus.description,
+          center: migrated.campus.center,
+          metadata: migrated.campus.metadata,
         });
-        accessRulesImported++;
       }
-    }
 
-    return {
-      success: true,
-      campusId: targetCampusId,
-      message: `Successfully imported site with isolated hierarchy.`,
-      stats: {
-        buildings: migrated.buildings.length,
-        floors: migrated.floors.length,
-        objectTypes: objectTypesImported,
-        objects: migrated.objects.length,
-        nodes: migrated.nodes.length,
-        connections: migrated.connections.length,
-        accessRules: accessRulesImported,
-      },
-    };
+      // ID translation maps to avoid collision and preserve graph topology
+      const buildingIdMap = new Map<string, string>();
+      const floorIdMap = new Map<string, string>();
+      const nodeIdMap = new Map<string, string>();
+      const objectIdMap = new Map<string, string>();
+
+      for (const b of migrated.buildings) {
+        buildingIdMap.set(b.id, uuidv4());
+      }
+      for (const f of migrated.floors) {
+        floorIdMap.set(f.id, uuidv4());
+      }
+      for (const n of migrated.nodes) {
+        nodeIdMap.set(n.id, uuidv4());
+      }
+      for (const o of migrated.objects) {
+        objectIdMap.set(o.id, uuidv4());
+      }
+
+      // 1. Create Buildings
+      for (const b of migrated.buildings) {
+        const newBldId = buildingIdMap.get(b.id)!;
+        await campusService.createBuilding({
+          id: newBldId,
+          campusId: targetCampusId,
+          code: b.code,
+          name: b.name,
+          description: b.description,
+          totalFloors: b.totalFloors,
+          entranceNodeIds: (b.entranceNodeIds || []).map(nid => nodeIdMap.get(nid) || nid),
+        });
+      }
+
+      // 2. Create Floors
+      for (const f of migrated.floors) {
+        const newFlrId = floorIdMap.get(f.id)!;
+        const mappedBldId = buildingIdMap.get(f.buildingId) || f.buildingId;
+        await campusService.createFloor({
+          id: newFlrId,
+          campusId: targetCampusId,
+          buildingId: mappedBldId,
+          level: f.level,
+          code: f.code,
+          name: f.name,
+          dimensions: f.dimensions,
+          planImageUrl: (f as any).planImageUrl,
+        });
+      }
+
+      // 3. Object Types
+      const existingTypesRes = await objectTypeService.getAll();
+      const existingTypeSlugs = new Set((existingTypesRes.data || []).map(t => t.slug));
+      let objectTypesImported = 0;
+
+      for (const ot of migrated.objectTypes) {
+        const slug = (ot as any).slug || ot.id;
+        if (!existingTypeSlugs.has(slug)) {
+          try {
+            await objectTypeService.create({
+              slug,
+              name: ot.name,
+              description: (ot as any).description || '',
+              category: ot.category as any,
+              iconName: ot.iconName,
+              color: ot.color,
+              isNavigable: ot.isWalkable ?? true,
+              isBarrier: false,
+              isConnector: false,
+              propertyDefinitions: ot.propertyDefinitions || [],
+            });
+            existingTypeSlugs.add(slug);
+            objectTypesImported++;
+          } catch {
+            // system or existing type already present
+          }
+        }
+      }
+
+      // 4. Objects (preserving geometry, objectTypeId, parent zones, properties, schedules)
+      for (const o of migrated.objects) {
+        const newObjId = objectIdMap.get(o.id)!;
+        const mappedBldId = buildingIdMap.get(o.buildingId) || o.buildingId;
+        const mappedFlrId = floorIdMap.get(o.floorId) || o.floorId;
+        const mappedParentId = o.parentObjectId ? (objectIdMap.get(o.parentObjectId) || o.parentObjectId) : undefined;
+        const mappedAssocNode = o.associatedNodeId ? (nodeIdMap.get(o.associatedNodeId) || o.associatedNodeId) : '';
+        const mappedEntranceNodes = (o.entranceNodeIds || []).map((id: string) => nodeIdMap.get(id) || id);
+
+        objectStore.create({
+          id: newObjId,
+          campusId: targetCampusId,
+          buildingId: mappedBldId,
+          floorId: mappedFlrId,
+          code: o.code,
+          name: o.name,
+          description: o.description,
+          category: o.category,
+          objectTypeId: o.objectTypeId,
+          geometry: o.geometry,
+          geometryType: o.geometryType as any,
+          coordinates: o.coordinates,
+          associatedNodeId: mappedAssocNode,
+          entranceNodeIds: mappedEntranceNodes,
+          isAccessible: o.isAccessible,
+          parentObjectId: mappedParentId,
+          subZoneType: o.subZoneType,
+          status: (o.status as any) || 'active',
+          tags: o.tags,
+          images: o.images,
+          historicalInfo: o.historicalInfo,
+          contactInfo: o.contactInfo,
+          externalLinks: o.externalLinks,
+          attributes: o.attributes,
+          properties: (o as any).properties,
+          accessSchedule: (o as any).accessSchedule,
+        });
+      }
+
+      // 5. Navigation Nodes
+      for (const n of migrated.nodes) {
+        const newNodeId = nodeIdMap.get(n.id)!;
+        const mappedBldId = buildingIdMap.get(n.buildingId) || n.buildingId;
+        const mappedFlrId = floorIdMap.get(n.floorId) || n.floorId;
+
+        navStore.createNode({
+          id: newNodeId,
+          campusId: targetCampusId,
+          buildingId: mappedBldId,
+          floorId: mappedFlrId,
+          type: n.type as any,
+          coordinates: n.coordinates,
+          isAccessible: n.isAccessible,
+          label: n.label,
+        });
+      }
+
+      // 6. Navigation Connections (preserving vertical transitions and connector metadata)
+      for (const c of migrated.connections) {
+        const mappedSourceNode = nodeIdMap.get(c.sourceNodeId) || c.sourceNodeId;
+        const mappedTargetNode = nodeIdMap.get(c.targetNodeId) || c.targetNodeId;
+        const mappedSourceBld = c.sourceBuildingId ? (buildingIdMap.get(c.sourceBuildingId) || c.sourceBuildingId) : undefined;
+        const mappedTargetBld = c.targetBuildingId ? (buildingIdMap.get(c.targetBuildingId) || c.targetBuildingId) : undefined;
+        const mappedSourceFlr = c.sourceFloorId ? (floorIdMap.get(c.sourceFloorId) || c.sourceFloorId) : undefined;
+        const mappedTargetFlr = c.targetFloorId ? (floorIdMap.get(c.targetFloorId) || c.targetFloorId) : undefined;
+
+        navStore.createConnection({
+          id: uuidv4(),
+          campusId: targetCampusId,
+          sourceNodeId: mappedSourceNode,
+          targetNodeId: mappedTargetNode,
+          sourceBuildingId: mappedSourceBld,
+          targetBuildingId: mappedTargetBld,
+          sourceFloorId: mappedSourceFlr,
+          targetFloorId: mappedTargetFlr,
+          connectionType: c.connectionType as any,
+          name: c.name || (c as any).metadata?.name || 'Imported Connection',
+          description: c.description || (c as any).metadata?.description,
+          distanceMeters: c.distanceMeters,
+          weightMultiplier: c.weightMultiplier || 1.0,
+          isWalkable: c.isWalkable ?? true,
+          isVehicleAccessible: c.isVehicleAccessible ?? false,
+          isAccessible: c.isAccessible ?? true,
+          isBidirectional: c.isBidirectional ?? true,
+          availability: c.availability,
+          isRestricted: c.isRestricted ?? false,
+          requiredPermissions: c.requiredPermissions,
+        });
+      }
+
+      // 7. Access Rules
+      let accessRulesImported = 0;
+      if (Array.isArray(migrated.accessRules)) {
+        for (const ar of migrated.accessRules) {
+          let mappedTargetId = ar.targetId;
+          if (ar.targetType === 'object') {
+            mappedTargetId = objectIdMap.get(ar.targetId) || ar.targetId;
+          } else if (ar.targetType === 'floor') {
+            mappedTargetId = floorIdMap.get(ar.targetId) || ar.targetId;
+          } else if (ar.targetType === 'building') {
+            mappedTargetId = buildingIdMap.get(ar.targetId) || ar.targetId;
+          }
+
+          await accessRuleService.createRule({
+            campusId: targetCampusId,
+            targetType: ar.targetType,
+            targetId: mappedTargetId,
+            ruleType: ar.ruleType,
+            name: ar.name,
+            description: ar.description,
+            validFrom: ar.validFrom,
+            validUntil: ar.validUntil,
+            activeDays: ar.activeDays,
+            openTime: ar.openTime,
+            closeTime: ar.closeTime,
+            allowedRoles: ar.allowedRoles,
+            isRoutingBlocked: ar.isRoutingBlocked,
+            closureReason: ar.closureReason,
+          });
+          accessRulesImported++;
+        }
+      }
+
+      auditService.log({
+        userId: user.id,
+        userEmail: user.email,
+        userRole: user.role,
+        action: 'IMPORT',
+        resourceType: 'campus',
+        resourceId: targetCampusId,
+        campusId: targetCampusId,
+        organizationId: targetOrgId,
+        status: 'SUCCESS',
+        details: {
+          importMode: mode,
+          buildingsCount: migrated.buildings.length,
+          floorsCount: migrated.floors.length,
+          objectsCount: migrated.objects.length,
+          nodesCount: migrated.nodes.length,
+          connectionsCount: migrated.connections.length,
+        },
+      });
+
+      return {
+        success: true,
+        campusId: targetCampusId,
+        message: mode === 'merge_into_existing'
+          ? `Successfully merged site records into campus '${targetCampusId}'.`
+          : `Successfully imported site with isolated hierarchy.`,
+        stats: {
+          buildings: migrated.buildings.length,
+          floors: migrated.floors.length,
+          objectTypes: objectTypesImported,
+          objects: migrated.objects.length,
+          nodes: migrated.nodes.length,
+          connections: migrated.connections.length,
+          accessRules: accessRulesImported,
+        },
+      };
+    });
   }
 
   /**

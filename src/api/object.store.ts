@@ -1,5 +1,7 @@
 import { MapObject } from '../types/object';
 import { INITIAL_MAP_OBJECTS } from './mock-data';
+import { securityValidation } from '../utils/security-validation';
+import { transactionService } from './transaction.service';
 import { v4 as uuidv4 } from 'uuid';
 
 const LS_OBJECTS = 'omnicampus_objects';
@@ -75,6 +77,13 @@ export const objectStore = {
   },
 
   create(data: Partial<MapObject>): MapObject {
+    if (data.coordinates) {
+      securityValidation.validateCoordinates(data.coordinates);
+    }
+    if (data.geometry) {
+      securityValidation.validateGeoJson(data.geometry);
+    }
+
     const now = new Date().toISOString();
     const obj: MapObject = {
       id: data.id || uuidv4(),
@@ -130,6 +139,12 @@ export const objectStore = {
   },
 
   update(id: string, patch: Partial<MapObject>): MapObject | null {
+    if (patch.coordinates) {
+      securityValidation.validateCoordinates(patch.coordinates);
+    }
+    if (patch.geometry) {
+      securityValidation.validateGeoJson(patch.geometry);
+    }
     const idx = objects.findIndex(o => o.id === id);
     if (idx === -1) return null;
     const updated = { ...objects[idx], ...patch, updatedAt: new Date().toISOString() };
@@ -207,6 +222,9 @@ export const objectStore = {
     if (!safety.canDelete && !force) {
       return false;
     }
+
+    // Clean up orphaned navigation nodes & edges
+    transactionService.cleanupOrphanedNodesForObject(id);
 
     // If force, also clean or detach child zones
     if (force && safety.childZonesCount > 0) {

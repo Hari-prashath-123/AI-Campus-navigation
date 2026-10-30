@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { aiService } from '../api/ai.service';
-import { AIChatMessage, SupportedLanguage, LanguageConfig } from '../types/ai';
+import { campusService } from '../api/campus.service';
+import { AIChatMessage, SupportedLanguage, LanguageConfig, Campus } from '../types';
 import { generateEntityId } from '../utils/validation';
-import { Bot, Send, Globe, MapPin, Loader2, ChevronRight, Navigation } from 'lucide-react';
+import { Bot, Send, Globe, MapPin, Loader2, ChevronRight, Navigation, Building2 } from 'lucide-react';
 
 // ─── Language config ──────────────────────────────────────────────────────────
 
@@ -128,9 +129,9 @@ function ToolCallBadge({ name }: { name: string }) {
 
 // ─── Main AI Assistant Page ───────────────────────────────────────────────────
 
-const DEMO_CAMPUS_ID = 'campus-1';
-
 export const AIAssistantPage: React.FC = () => {
+  const [campuses, setCampuses] = useState<Campus[]>([]);
+  const [activeCampusId, setActiveCampusId] = useState<string>('campus-tech-inst');
   const [messages, setMessages] = useState<AIChatMessage[]>([
     {
       id: 'sys-1',
@@ -144,6 +145,15 @@ export const AIAssistantPage: React.FC = () => {
   const [selectedLang, setSelectedLang] = useState<SupportedLanguage>('en');
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    campusService.getCampuses().then(res => {
+      if (res.success && res.data.length > 0) {
+        setCampuses(res.data);
+        setActiveCampusId(res.data[0].id);
+      }
+    });
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -173,7 +183,7 @@ export const AIAssistantPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const res = await aiService.processQuery(DEMO_CAMPUS_ID, query);
+      const res = await aiService.processQuery(activeCampusId, query);
       setMessages(prev => {
         const without = prev.filter(m => !m.isThinking);
         return [...without, res.data];
@@ -254,7 +264,23 @@ export const AIAssistantPage: React.FC = () => {
             <h1 className="font-bold text-slate-900 text-sm">Campus AI Assistant</h1>
             <p className="text-xs text-slate-500">Powered by deterministic campus tools · No hallucinations</p>
           </div>
-          <div className="ml-auto flex items-center gap-2 text-xs text-slate-400 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-200">
+          {campuses.length > 1 && (
+            <div className="ml-auto flex items-center gap-1.5 text-xs">
+              <Building2 size={13} className="text-slate-400" />
+              <select
+                value={activeCampusId}
+                onChange={e => setActiveCampusId(e.target.value)}
+                className="bg-slate-50 border border-slate-200 text-slate-700 text-xs rounded-lg px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                {campuses.map(c => (
+                  <option key={c.id} value={c.id}>
+                    {c.name.en || c.code}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div className={`${campuses.length > 1 ? '' : 'ml-auto'} flex items-center gap-2 text-xs text-slate-400 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-200`}>
             <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
             {FLAG[selectedLang]} {LANGUAGES.find(l => l.code === selectedLang)?.nativeName}
           </div>
@@ -300,6 +326,28 @@ export const AIAssistantPage: React.FC = () => {
                     {msg.poiResults && msg.poiResults.length > 0 && (
                       <div className="space-y-2 w-full">
                         {msg.poiResults.map((poi: any) => <POICard key={poi.id} poi={poi} />)}
+                      </div>
+                    )}
+
+                    {/* Clarification options chips */}
+                    {msg.clarificationOptions && msg.clarificationOptions.length > 0 && (
+                      <div className="flex flex-col gap-1.5 w-full mt-2">
+                        <span className="text-xs font-semibold text-slate-500">
+                          {selectedLang === 'ta' ? 'பரிந்துரைக்கப்பட்ட இடங்கள்:' : selectedLang === 'hi' ? 'सुझाए गए स्थान:' : 'Suggested locations:'}
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                          {msg.clarificationOptions.map(opt => (
+                            <button
+                              key={opt.id}
+                              onClick={() => handleSend(opt.label)}
+                              className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-3 py-1.5 rounded-lg text-left transition-colors flex items-center gap-1.5 shadow-sm"
+                            >
+                              <MapPin size={12} className="text-blue-500 shrink-0" />
+                              <span className="font-medium">{opt.label}</span>
+                              {opt.code && <span className="text-blue-400 text-[10px]">({opt.code})</span>}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
 

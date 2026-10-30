@@ -15,6 +15,7 @@ export type AIToolName =
   | 'getFloorDetails'
   | 'getNearbyObjects'
   | 'getEntranceAvailability'
+  | 'checkOperatingSchedule'
   | 'findRoute'
   | 'getCampusInformation'
   | 'resolveWorkflow';
@@ -57,9 +58,20 @@ export interface AIToolResult {
   };
 }
 
+export interface ClarificationOption {
+  id: string;
+  label: string;
+  code?: string;
+  buildingName?: string;
+  floorLevel?: number;
+  category?: string;
+  description?: string;
+}
+
 /** A sanitized POI DTO returned by llmTools — not raw MapObject */
 export interface SafePOI {
   id: string;
+  code?: string;
   name: string;
   description?: string;
   type: string;
@@ -89,4 +101,23 @@ export interface AIChatMessage {
   routeResult?: RouteResult;
   poiResults?: SafePOI[];
   isThinking?: boolean;
+  isAmbiguous?: boolean;
+  clarificationOptions?: ClarificationOption[];
+}
+
+export interface ToolParameterProperty {
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  description: string;
+  enum?: string[];
+  items?: { type: string };
+}
+
+export interface ToolDefinition {
+  name: AIToolName;
+  description: string;
+  parameters: {
+    type: 'object';
+    properties: Record<string, ToolParameterProperty>;
+    required: string[];
+  };
 }

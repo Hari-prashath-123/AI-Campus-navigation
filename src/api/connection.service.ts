@@ -1,5 +1,7 @@
 import { CampusConnection, ConnectionType } from '../types/connection';
 import { navStore } from './nav.store';
+import { authGuard } from './auth-guard';
+import { auditService } from './audit.service';
 
 export interface VerticalTransitionInput {
   campusId: string;
@@ -46,43 +48,54 @@ export const connectionService = {
   },
 
   createConnection: async (data: Partial<CampusConnection>): Promise<{ success: boolean; data?: CampusConnection; message?: string }> => {
-    return new Promise(resolve => {
-      if (!data.campusId || !data.sourceNodeId || !data.targetNodeId || !data.connectionType) {
-        return resolve({ success: false, message: 'Missing required connection fields.' });
-      }
+    if (!data.campusId || !data.sourceNodeId || !data.targetNodeId || !data.connectionType) {
+      return { success: false, message: 'Missing required connection fields.' };
+    }
 
-      if (data.sourceNodeId === data.targetNodeId) {
-        return resolve({ success: false, message: 'Source and target cannot be the same.' });
-      }
+    if (data.sourceNodeId === data.targetNodeId) {
+      return { success: false, message: 'Source and target cannot be the same.' };
+    }
 
-      const res = navStore.createConnection({
-        campusId: data.campusId,
-        sourceNodeId: data.sourceNodeId,
-        sourceBuildingId: data.sourceBuildingId,
-        sourceFloorId: data.sourceFloorId,
-        targetNodeId: data.targetNodeId,
-        targetBuildingId: data.targetBuildingId,
-        targetFloorId: data.targetFloorId,
-        connectionType: data.connectionType,
-        name: data.name || 'Unnamed Connection',
-        description: data.description,
-        isBidirectional: data.isBidirectional ?? true,
-        isAccessible: data.isAccessible ?? true,
-        isWalkable: data.isWalkable ?? true,
-        isVehicleAccessible: data.isVehicleAccessible ?? false,
-        isRestricted: data.isRestricted ?? false,
-        requiredPermissions: data.requiredPermissions,
-        distanceMeters: data.distanceMeters || 10,
-        weightMultiplier: data.weightMultiplier || 1.0,
-        availability: data.availability,
-      });
+    const user = await authGuard.enforce('create', 'connection', { campusId: data.campusId });
 
-      if ('error' in res) {
-        return resolve({ success: false, message: res.error });
-      }
-
-      resolve({ success: true, data: res });
+    const res = navStore.createConnection({
+      campusId: data.campusId,
+      sourceNodeId: data.sourceNodeId,
+      sourceBuildingId: data.sourceBuildingId,
+      sourceFloorId: data.sourceFloorId,
+      targetNodeId: data.targetNodeId,
+      targetBuildingId: data.targetBuildingId,
+      targetFloorId: data.targetFloorId,
+      connectionType: data.connectionType,
+      name: data.name || 'Unnamed Connection',
+      description: data.description,
+      isBidirectional: data.isBidirectional ?? true,
+      isAccessible: data.isAccessible ?? true,
+      isWalkable: data.isWalkable ?? true,
+      isVehicleAccessible: data.isVehicleAccessible ?? false,
+      isRestricted: data.isRestricted ?? false,
+      requiredPermissions: data.requiredPermissions,
+      distanceMeters: data.distanceMeters || 10,
+      weightMultiplier: data.weightMultiplier || 1.0,
+      availability: data.availability,
     });
+
+    if ('error' in res) {
+      return { success: false, message: res.error };
+    }
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'CREATE',
+      resourceType: 'connection',
+      resourceId: res.id,
+      campusId: res.campusId,
+      status: 'SUCCESS',
+    });
+
+    return { success: true, data: res };
   },
 
   /**
@@ -155,19 +168,48 @@ export const connectionService = {
   },
 
   updateConnection: async (id: string, data: Partial<CampusConnection>): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => {
-      const updated = navStore.updateConnection(id, data);
-      if (!updated) {
-        return resolve({ success: false, message: 'Connection not found or invalid.' });
-      }
-      resolve({ success: true });
+    const existing = navStore.getConnectionById(id);
+    const user = await authGuard.enforce('update', 'connection', { campusId: existing?.campusId });
+
+    const updated = navStore.updateConnection(id, data);
+    if (!updated) {
+      return { success: false, message: 'Connection not found or invalid.' };
+    }
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'UPDATE',
+      resourceType: 'connection',
+      resourceId: id,
+      campusId: existing?.campusId,
+      status: 'SUCCESS',
     });
+
+    return { success: true };
   },
 
   deleteConnection: async (id: string): Promise<{ success: boolean; message?: string }> => {
-    return new Promise(resolve => {
-      const deleted = navStore.deleteConnection(id);
-      resolve({ success: deleted, message: deleted ? undefined : 'Connection not found' });
+    const existing = navStore.getConnectionById(id);
+    const user = await authGuard.enforce('delete', 'connection', { campusId: existing?.campusId });
+
+    const deleted = navStore.deleteConnection(id);
+    if (!deleted) {
+      return { success: false, message: 'Connection not found' };
+    }
+
+    auditService.log({
+      userId: user.id,
+      userEmail: user.email,
+      userRole: user.role,
+      action: 'DELETE',
+      resourceType: 'connection',
+      resourceId: id,
+      campusId: existing?.campusId,
+      status: 'SUCCESS',
     });
+
+    return { success: true };
   }
 };

@@ -39,7 +39,7 @@ export const CampusMapEditor: React.FC = () => {
   return (
     <div className="flex flex-col h-full bg-slate-50">
       <div className="flex-1 overflow-hidden relative">
-        <MapEditor campus={campus} campusId={campus.id} />
+        <MapEditor key={campus.id} campus={campus} campusId={campus.id} />
       </div>
     </div>
   );

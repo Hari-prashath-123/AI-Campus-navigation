@@ -184,7 +184,7 @@ export const CampusList: React.FC = () => {
                       {campus.description?.en || 'No description provided.'}
                     </p>
                     
-                    <div className="mt-auto pt-4 flex items-center justify-between">
+                    <div className="mt-auto pt-4 flex items-center justify-between border-t border-slate-100">
                       <div className="flex items-center gap-1 text-slate-400 text-sm">
                         <Building2 size={16} />
                         <span>Manage buildings &amp; floors</span>
@@ -195,13 +195,14 @@ export const CampusList: React.FC = () => {
                     </div>
                   </div>
                 </Link>
-                {/* Delete button — appears on card hover */}
+                {/* Delete button — clearly visible and accessible */}
                 <button
                   onClick={(e) => handleDeleteRequest(campus, e)}
                   title="Delete campus"
-                  className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center text-slate-400 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-colors opacity-0 group-hover/card:opacity-100"
+                  aria-label="Delete campus"
+                  className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-white/95 border border-slate-200 shadow-sm flex items-center justify-center text-slate-400 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-all opacity-80 hover:opacity-100"
                 >
-                  <Trash2 size={14} />
+                  <Trash2 size={15} />
                 </button>
               </div>
             ))}
@@ -260,6 +261,56 @@ export const CampusList: React.FC = () => {
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={() => setIsCreating(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} isLoading={saving} disabled={!newCampusName.trim()}>Create Campus</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete Campus Confirmation Modal */}
+      <Modal 
+        isOpen={!!campusToDelete} 
+        onClose={() => { setCampusToDelete(null); setDeleteInfo(null); }} 
+        title="Delete Campus"
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 p-3.5 bg-red-50 text-red-800 rounded-xl border border-red-200">
+            <AlertTriangle className="shrink-0 mt-0.5 text-red-600" size={20} />
+            <div className="text-sm">
+              <p className="font-semibold">
+                Are you sure you want to delete &ldquo;{campusToDelete?.name?.en || campusToDelete?.code}&rdquo;?
+              </p>
+              <p className="mt-1 text-red-700 text-xs">
+                This will permanently delete this campus, including all its buildings, floors, objects, and navigation routes. This action cannot be undone.
+              </p>
+            </div>
+          </div>
+
+          {deleteInfo?.issues && deleteInfo.issues.length > 0 && (
+            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs text-slate-600 space-y-1.5">
+              <p className="font-semibold text-slate-700">Associated data to be deleted:</p>
+              <ul className="list-disc pl-5 space-y-0.5 text-slate-600">
+                {deleteInfo.issues.map((issue, idx) => (
+                  <li key={idx}>{issue}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+            <Button 
+              variant="outline" 
+              onClick={() => { setCampusToDelete(null); setDeleteInfo(null); }}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button 
+              variant="danger" 
+              onClick={handleDeleteConfirm} 
+              isLoading={deleting}
+              icon={<Trash2 size={16} />}
+            >
+              Delete Campus
+            </Button>
           </div>
         </div>
       </Modal>

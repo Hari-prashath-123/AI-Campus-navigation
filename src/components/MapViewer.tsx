@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { MapObject, SpatialNode } from '../types';
+import { MapObject, SpatialNode, EditorShape } from '../types';
 import { CampusConnection } from '../types/connection';
 import { RouteResult } from '../api/routing.service';
 import { Plus, Minus, RotateCcw, Navigation, MapPin, X, Check } from 'lucide-react';
@@ -17,6 +17,8 @@ interface MapViewerProps {
   onObjectClick?: (obj: MapObject) => void;
   onSelectAsSource?: (obj: MapObject) => void;
   onSelectAsDestination?: (obj: MapObject) => void;
+  shapes?: EditorShape[];
+  onShapeClick?: (shape: EditorShape) => void;
 }
 
 export const MapViewer: React.FC<MapViewerProps> = ({ 
@@ -31,8 +33,12 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   height: initialHeight = 650,
   onObjectClick,
   onSelectAsSource,
-  onSelectAsDestination
+  onSelectAsDestination,
+  shapes = [],
+  onShapeClick,
 }) => {
+  const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const [, setTriggerRender] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -72,15 +78,39 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     setZoom(prev => Math.min(Math.max(0.5, prev * factor), 4));
   };
 
-  // Convert map coordinates (0-100 percentage space) to screen coordinates
+  // Convert map coordinates to screen coordinates with 1:1 uniform scale matching Map Editor
   const toScreenCoords = useCallback((coord: { x: number; y: number }) => {
-    const baseW = dimensions.width;
-    const baseH = dimensions.height;
-    const cx = (coord.x / 100) * baseW;
-    const cy = (coord.y / 100) * baseH;
+    // If viewing fallback mock data with no custom editor shapes, coordinates <= 100 are meters (1m = 12px)
+    // If custom editor shapes exist, coordinates are always in 1200 x 960 canvas pixels
+    const hasCustomShapes = Boolean(shapes && shapes.length > 0);
+    const isMeters = !hasCustomShapes && coord.x <= 100 && coord.y <= 100;
+    const pxX = isMeters ? coord.x * 12 : coord.x;
+    const pxY = isMeters ? coord.y * 12 : coord.y;
+
+    // Uniform 1:1 scale factor so 1200 x 960 canvas fits within container with padding
+    const fitScale = Math.min((dimensions.width - 40) / 1200, (dimensions.height - 40) / 960);
+    const totalScale = fitScale * zoom;
+
+    const offsetX = (dimensions.width - 1200 * totalScale) / 2;
+    const offsetY = (dimensions.height - 960 * totalScale) / 2;
+
     return {
-      x: (cx - baseW / 2) * zoom + baseW / 2 + pan.x,
-      y: (cy - baseH / 2) * zoom + baseH / 2 + pan.y,
+      x: offsetX + pxX * totalScale + pan.x,
+      y: offsetY + pxY * totalScale + pan.y,
+    };
+  }, [dimensions, zoom, pan, shapes]);
+
+  // Convert canvas editor pixel coordinates (1200 x 960) to screen coordinates
+  const shapeToScreen = useCallback((x: number, y: number) => {
+    const fitScale = Math.min((dimensions.width - 40) / 1200, (dimensions.height - 40) / 960);
+    const totalScale = fitScale * zoom;
+
+    const offsetX = (dimensions.width - 1200 * totalScale) / 2;
+    const offsetY = (dimensions.height - 960 * totalScale) / 2;
+
+    return {
+      x: offsetX + x * totalScale + pan.x,
+      y: offsetY + y * totalScale + pan.y,
     };
   }, [dimensions, zoom, pan]);
 
@@ -120,9 +150,154 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     }
     ctx.restore();
 
-    const floorObjects = objects.filter(o => o.floorId === currentFloorId);
-    const floorNodes = nodes.filter(n => n.floorId === currentFloorId);
+    const floorObjects = currentFloorId ? objects.filter(o => o.floorId === currentFloorId) : objects.filter(o => !o.floorId);
+    const floorNodes = currentFloorId ? nodes.filter(n => n.floorId === currentFloorId) : nodes.filter(n => !n.floorId);
     const floorNodeMap = new Map(floorNodes.map(n => [n.id, n]));
+
+    // 0. Draw Map Editor Shapes & 2D Preset Elements (Buildings, Roads, Lawns, Walls, Gates, Trees, Turf)
+    if (shapes && shapes.length > 0) {
+      ctx.save();
+      shapes.forEach(shape => {
+        const p1 = shapeToScreen(shape.x, shape.y);
+        const fitScale = Math.min((dimensions.width - 40) / 1200, (dimensions.height - 40) / 960);
+        const sw = (shape.width || 60) * fitScale * zoom;
+        const sh = (shape.height || 60) * fitScale * zoom;
+
+        // A. Image / 2D Preset Element (buildings, trees, gates, fences, turf)
+        if (shape.geometryType === 'image' && shape.elementDataUrl) {
+          let img = imageCacheRef.current.get(shape.elementDataUrl);
+          if (!img) {
+            img = new Image();
+            img.src = shape.elementDataUrl;
+            img.onload = () => setTriggerRender(v => v + 1);
+            imageCacheRef.current.set(shape.elementDataUrl, img);
+          }
+
+          if (img.complete && img.naturalWidth > 0) {
+            ctx.save();
+            ctx.translate(p1.x, p1.y);
+            if (shape.rotation) {
+              ctx.rotate((shape.rotation * Math.PI) / 180);
+            }
+            ctx.drawImage(img, 0, 0, sw, sh);
+            ctx.restore();
+          }
+          return;
+        }
+
+        // B. Polylines: Roads, Google Maps Navigation Paths, Wall Lines
+        if (shape.geometryType === 'polyline' && shape.points && shape.points.length >= 4) {
+          const isRoad = shape.name.toLowerCase().includes('road') || shape.elementKey?.startsWith('road') || shape.attributes?.isRoad;
+          const isNavPath = shape.attributes?.isPath === true || shape.name.toLowerCase().includes('path');
+          const isWallLine = shape.attributes?.isWall === true;
+
+          const screenPts: { x: number; y: number }[] = [];
+          for (let i = 0; i < shape.points.length; i += 2) {
+            screenPts.push(shapeToScreen(shape.points[i], shape.points[i + 1]));
+          }
+
+          if (isRoad) {
+            // Road Curbs
+            ctx.strokeStyle = '#9ca3af';
+            ctx.lineWidth = Math.max(28 * fitScale * zoom, 12);
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            screenPts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
+            ctx.stroke();
+
+            // Asphalt Body
+            ctx.strokeStyle = '#374151';
+            ctx.lineWidth = Math.max(24 * fitScale * zoom, 10);
+            ctx.beginPath();
+            screenPts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
+            ctx.stroke();
+
+            // Yellow Dashed Center line
+            ctx.save();
+            ctx.strokeStyle = '#facc15';
+            ctx.lineWidth = Math.max(2.5 * fitScale * zoom, 1);
+            ctx.setLineDash([10 * fitScale * zoom, 8 * fitScale * zoom]);
+            ctx.beginPath();
+            screenPts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
+            ctx.stroke();
+            ctx.restore();
+          } else if (isNavPath) {
+            // Google Maps Style Navigation Walking Path (light grey transparent line)
+            ctx.save();
+            ctx.strokeStyle = 'rgba(148, 163, 184, 0.75)';
+            ctx.lineWidth = Math.max(8 * fitScale * zoom, 4);
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            screenPts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
+            ctx.stroke();
+
+            // Center highlight
+            ctx.strokeStyle = 'rgba(226, 232, 240, 0.6)';
+            ctx.lineWidth = Math.max(3 * fitScale * zoom, 1.5);
+            ctx.stroke();
+            ctx.restore();
+          } else if (isWallLine) {
+            // Solid Dark Wall Line
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = Math.max(5 * fitScale * zoom, 2);
+            ctx.lineCap = 'square';
+            ctx.beginPath();
+            screenPts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
+            ctx.stroke();
+          } else {
+            // Generic polyline
+            ctx.strokeStyle = shape.color || '#3b82f6';
+            ctx.lineWidth = Math.max(3 * zoom, 1.5);
+            ctx.beginPath();
+            screenPts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
+            ctx.stroke();
+          }
+          return;
+        }
+
+        // C. Rectangles & Polygons: Lawns, Buildings, Rooms
+        if ((shape.geometryType as any) === 'rectangle' || shape.geometryType === 'polygon') {
+          ctx.save();
+          ctx.translate(p1.x, p1.y);
+          if (shape.rotation) {
+            ctx.rotate((shape.rotation * Math.PI) / 180);
+          }
+          ctx.fillStyle = shape.color ? `${shape.color}44` : '#e2e8f0';
+          ctx.strokeStyle = shape.color || '#94a3b8';
+          ctx.lineWidth = Math.max(1.5 * fitScale * zoom, 1);
+          ctx.beginPath();
+          ctx.rect(0, 0, sw, sh);
+          ctx.fill();
+          ctx.stroke();
+
+          // Label
+          if (shape.name && sw > 50) {
+            ctx.fillStyle = '#475569';
+            ctx.font = `600 ${Math.max(10 * fitScale * zoom, 8)}px Inter, sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.fillText(shape.name, sw / 2, sh / 2);
+          }
+          ctx.restore();
+          return;
+        }
+
+        // D. Circles / Ellipses
+        if (shape.geometryType === 'circle' || shape.geometryType === 'ellipse') {
+          ctx.save();
+          ctx.fillStyle = shape.color ? `${shape.color}44` : '#e2e8f0';
+          ctx.strokeStyle = shape.color || '#94a3b8';
+          ctx.lineWidth = Math.max(1.5 * zoom, 1);
+          ctx.beginPath();
+          ctx.ellipse(p1.x + sw / 2, p1.y + sh / 2, sw / 2, sh / 2, 0, 0, 2 * Math.PI);
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }
+      });
+      ctx.restore();
+    }
 
     // 1. Draw floor corridors / connections
     const floorConns = connections.filter(
@@ -306,11 +481,18 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
     // 4. Draw Objects / POIs on this floor
     floorObjects.forEach(obj => {
-      const pt = toScreenCoords(obj.coordinates);
       const isStart = sourceObj?.id === obj.id;
       const isEnd = destObj?.id === obj.id;
       const isSelected = selectedObj?.id === obj.id;
 
+      // When visual 2D shapes are present, suppress generic circles for decorative elements (trees, grass, roads, walls)
+      const objNameStr = typeof obj.name === 'string' ? obj.name : (obj.name?.en || obj.code || '');
+      const isDecorative = /tree|turf|grass|road|wall|fence|gate|hedge/i.test(objNameStr);
+      if (shapes.length > 0 && isDecorative && !isStart && !isEnd && !isSelected) {
+        return;
+      }
+
+      const pt = toScreenCoords(obj.coordinates);
       const radius = Math.max((isStart || isEnd || isSelected ? 18 : 14) * zoom, 8);
 
       // Color coding per category
@@ -397,7 +579,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       ctx.restore();
     });
 
-  }, [dimensions, zoom, pan, objects, nodes, connections, routeResult, currentFloorId, sourceObj, destObj, selectedObj, toScreenCoords]);
+  }, [dimensions, zoom, pan, objects, nodes, connections, routeResult, currentFloorId, sourceObj, destObj, selectedObj, toScreenCoords, shapes, shapeToScreen]);
 
   // Click handler to select object or open popover
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -425,6 +607,36 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       if (onObjectClick) onObjectClick(hit);
     } else {
       setSelectedObj(null);
+      // Check if a shape was clicked (for drill-down navigation)
+      if (onShapeClick && shapes.length > 0) {
+        const fitScale = Math.min((dimensions.width - 40) / 1200, (dimensions.height - 40) / 960);
+        const totalScale = fitScale * zoom;
+        const offsetX = (dimensions.width - 1200 * totalScale) / 2;
+        const offsetY = (dimensions.height - 960 * totalScale) / 2;
+        const canvasX = (clickX - pan.x - offsetX) / totalScale;
+        const canvasY = (clickY - pan.y - offsetY) / totalScale;
+
+        for (let i = shapes.length - 1; i >= 0; i--) {
+          const s = shapes[i];
+          const sx = s.x ?? 0, sy = s.y ?? 0;
+          const sw = s.width ?? 60, sh = s.height ?? 40;
+          let rx = canvasX - sx;
+          let ry = canvasY - sy;
+          if (s.rotation) {
+            const rad = (-s.rotation * Math.PI) / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            const nrx = rx * cos - ry * sin;
+            const nry = rx * sin + ry * cos;
+            rx = nrx;
+            ry = nry;
+          }
+          if (rx >= 0 && rx <= sw && ry >= 0 && ry <= sh) {
+            onShapeClick(s);
+            break;
+          }
+        }
+      }
     }
   };
 

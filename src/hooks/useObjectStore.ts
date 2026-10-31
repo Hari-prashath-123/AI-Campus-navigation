@@ -13,11 +13,15 @@ export function useObjectStore(options?: { campusId?: string; floorId?: string }
     return unsub;
   }, []);
 
-  const objects: MapObject[] = options?.floorId
-    ? objectStore.getByFloor(options.floorId)
-    : options?.campusId
-    ? objectStore.getByCampus(options.campusId)
-    : objectStore.getAll();
+  const objects: MapObject[] = (() => {
+    if (options && 'floorId' in options) {
+      return options.floorId ? objectStore.getByFloor(options.floorId) : [];
+    }
+    if (options && 'campusId' in options) {
+      return options.campusId ? objectStore.getByCampus(options.campusId) : [];
+    }
+    return objectStore.getAll();
+  })();
 
   const createObject = useCallback(
     (data: Partial<MapObject>) => objectStore.create(data),

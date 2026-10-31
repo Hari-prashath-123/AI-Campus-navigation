@@ -15,15 +15,25 @@ export function useNavStore(options?: { campusId?: string; floorId?: string }) {
     return unsub;
   }, []);
 
-  const nodes: SpatialNode[] = options?.floorId
-    ? navStore.getNodesByFloor(options.floorId)
-    : options?.campusId
-    ? navStore.getNodesByCampus(options.campusId)
-    : navStore.getNodes();
+  const nodes: SpatialNode[] = (() => {
+    if (options && 'floorId' in options) {
+      return options.floorId ? navStore.getNodesByFloor(options.floorId) : [];
+    }
+    if (options && 'campusId' in options) {
+      return options.campusId ? navStore.getNodesByCampus(options.campusId) : [];
+    }
+    return navStore.getNodes();
+  })();
 
-  const connections: CampusConnection[] = options?.campusId
-    ? navStore.getConnectionsByCampus(options.campusId)
-    : navStore.getConnections();
+  const connections: CampusConnection[] = (() => {
+    if (options && 'floorId' in options) {
+      return options.floorId ? navStore.getConnectionsByFloor(options.floorId) : [];
+    }
+    if (options && 'campusId' in options) {
+      return options.campusId ? navStore.getConnectionsByCampus(options.campusId) : [];
+    }
+    return navStore.getConnections();
+  })();
 
   const createNode = useCallback(
     (data: Omit<SpatialNode, 'id'>) => navStore.createNode(data),

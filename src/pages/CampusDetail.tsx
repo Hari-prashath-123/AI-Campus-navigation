@@ -9,7 +9,7 @@ import { LoadingState } from '../components/ui/LoadingState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Modal } from '../components/ui/Modal';
-import { Map, Building2, Plus, Edit2, Network, FileJson, Trash2, Copy, ShieldAlert as ShieldAlertIcon } from 'lucide-react';
+import { Map, Building2, Plus, Edit2, Network, FileJson, Trash2, Copy, ShieldAlert as ShieldAlertIcon, AlertTriangle } from 'lucide-react';
 
 export const CampusDetail: React.FC = () => {
   const { campusId } = useParams<{ campusId: string }>();
@@ -31,6 +31,10 @@ export const CampusDetail: React.FC = () => {
   const [deleteConfirm, setDeleteConfirm] = useState<Building | null>(null);
   const [duplicateConfirm, setDuplicateConfirm] = useState<Building | null>(null);
   const [duplicateName, setDuplicateName] = useState('');
+
+  // Delete Campus state
+  const [deleteCampusConfirm, setDeleteCampusConfirm] = useState(false);
+  const [campusDeleteInfo, setCampusDeleteInfo] = useState<{ issues: string[]; stats: any } | null>(null);
 
   useEffect(() => {
     if (campusId) {
@@ -112,17 +116,34 @@ export const CampusDetail: React.FC = () => {
     if (!duplicateConfirm || !duplicateName.trim() || !campus) return;
     try {
       setSaving(true);
-      // Create a new building based on the old one
       const res = await campusService.createBuilding({
         campusId: campus.id,
         name: { en: duplicateName },
-        // Would also copy floors and properties here if the API supported it in a single call
-        // For now we just create a new building with the duplicated name
       });
       if (res.success && res.data) {
         setDuplicateConfirm(null);
         setDuplicateName('');
         if (campusId) loadData(campusId);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteCampusRequest = async () => {
+    if (!campus) return;
+    const info = await campusService.canDeleteCampus(campus.id);
+    setCampusDeleteInfo({ issues: info.issues, stats: info.stats });
+    setDeleteCampusConfirm(true);
+  };
+
+  const handleDeleteCampus = async () => {
+    if (!campus) return;
+    try {
+      setSaving(true);
+      const res = await campusService.deleteCampus(campus.id, true);
+      if (res.success) {
+        navigate('/admin/campuses');
       }
     } finally {
       setSaving(false);
@@ -149,7 +170,7 @@ export const CampusDetail: React.FC = () => {
               <p className="text-sm text-slate-500 font-mono mt-1">CODE: {campus.code}</p>
               <p className="text-slate-600 mt-4 max-w-3xl">{campus.description?.en || 'No description provided.'}</p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2 justify-end">
               <Link to={`/admin/campuses/${campus.id}/connections`}>
                 <Button variant="outline" icon={<Network size={18} />}>Routing &amp; Connections</Button>
               </Link>
@@ -163,6 +184,14 @@ export const CampusDetail: React.FC = () => {
                 <Button variant="outline" icon={<FileJson size={18} />}>Import / Export</Button>
               </Link>
               <Button variant="outline" icon={<Edit2 size={18} />}>Edit</Button>
+              <Button 
+                variant="outline" 
+                className="text-red-600 hover:bg-red-50 hover:border-red-200" 
+                icon={<Trash2 size={18} />}
+                onClick={handleDeleteCampusRequest}
+              >
+                Delete
+              </Button>
             </div>
           </div>
 
@@ -263,15 +292,15 @@ export const CampusDetail: React.FC = () => {
             autoFocus
           />
           <div className="grid grid-cols-2 gap-3">
-            <Input
-              label="Code (optional)"
-              placeholder="e.g. SCI-A"
+            <Input 
+              label="Code (optional)" 
+              placeholder="e.g. SCI-A" 
               value={newBuildingCode}
               onChange={e => setNewBuildingCode(e.target.value.toUpperCase())}
             />
-            <Input
-              label="Total Floors"
-              type="number"
+            <Input 
+              label="Total Floors" 
+              type="number" 
               value={newBuildingFloors}
               onChange={e => setNewBuildingFloors(parseInt(e.target.value) || 1)}
               helperText="Including ground floor"
@@ -317,6 +346,56 @@ export const CampusDetail: React.FC = () => {
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={() => setDuplicateConfirm(null)}>Cancel</Button>
             <Button variant="primary" onClick={handleDuplicateBuilding} isLoading={saving} disabled={!duplicateName.trim()}>Duplicate</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete Campus Confirmation Modal */}
+      <Modal 
+        isOpen={deleteCampusConfirm} 
+        onClose={() => { setDeleteCampusConfirm(false); setCampusDeleteInfo(null); }} 
+        title="Delete Campus"
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 p-3.5 bg-red-50 text-red-800 rounded-xl border border-red-200">
+            <AlertTriangle className="shrink-0 mt-0.5 text-red-600" size={20} />
+            <div className="text-sm">
+              <p className="font-semibold">
+                Are you sure you want to delete &ldquo;{campus.name.en || campus.code}&rdquo;?
+              </p>
+              <p className="mt-1 text-red-700 text-xs">
+                This will permanently delete this campus, including all its buildings, floors, objects, and navigation routes. This action cannot be undone.
+              </p>
+            </div>
+          </div>
+
+          {campusDeleteInfo?.issues && campusDeleteInfo.issues.length > 0 && (
+            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs text-slate-600 space-y-1.5">
+              <p className="font-semibold text-slate-700">Associated data to be deleted:</p>
+              <ul className="list-disc pl-5 space-y-0.5 text-slate-600">
+                {campusDeleteInfo.issues.map((issue, idx) => (
+                  <li key={idx}>{issue}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+            <Button 
+              variant="outline" 
+              onClick={() => { setDeleteCampusConfirm(false); setCampusDeleteInfo(null); }}
+              disabled={saving}
+            >
+              Cancel
+            </Button>
+            <Button 
+              variant="danger" 
+              onClick={handleDeleteCampus} 
+              isLoading={saving}
+              icon={<Trash2 size={16} />}
+            >
+              Delete Campus
+            </Button>
           </div>
         </div>
       </Modal>

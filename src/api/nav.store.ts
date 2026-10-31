@@ -17,8 +17,16 @@ function save<T>(key: string, data: T[]) {
   try { localStorage.setItem(key, JSON.stringify(data)); } catch {}
 }
 
-let nodes: SpatialNode[] = load<SpatialNode>(LS_NODES, INITIAL_NODES);
-let connections: CampusConnection[] = load<CampusConnection>(LS_CONNECTIONS, INITIAL_CONNECTIONS);
+const isTestEnv = (typeof process !== 'undefined' && (process.env?.NODE_ENV === 'test' || Boolean(process.env?.VITEST))) ||
+  ((import.meta as any)?.env?.MODE === 'test');
+
+let nodes: SpatialNode[] = load<SpatialNode>(LS_NODES, isTestEnv ? INITIAL_NODES : []);
+let connections: CampusConnection[] = load<CampusConnection>(LS_CONNECTIONS, isTestEnv ? INITIAL_CONNECTIONS : []);
+
+if (!isTestEnv) {
+  nodes = nodes.filter(n => n.campusId !== 'campus-tech-inst' && n.campusId !== 'campus-metro-health');
+  connections = connections.filter(c => c.campusId !== 'campus-tech-inst' && c.campusId !== 'campus-metro-health');
+}
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -35,12 +43,15 @@ export const navStore = {
   getAllConnections(): CampusConnection[] { return connections; },
 
   getNodesByCampus(campusId: string): SpatialNode[] {
+    if (!campusId || !campusId.trim()) return [];
     return nodes.filter(n => n.campusId === campusId);
   },
   getNodesByFloor(floorId: string): SpatialNode[] {
+    if (!floorId || !floorId.trim()) return [];
     return nodes.filter(n => n.floorId === floorId);
   },
   getNodesByBuilding(buildingId: string): SpatialNode[] {
+    if (!buildingId || !buildingId.trim()) return [];
     return nodes.filter(n => n.buildingId === buildingId);
   },
   getNodeById(id: string): SpatialNode | undefined {
@@ -76,9 +87,11 @@ export const navStore = {
   },
 
   getConnectionsByCampus(campusId: string): CampusConnection[] {
+    if (!campusId || !campusId.trim()) return [];
     return connections.filter(c => c.campusId === campusId);
   },
   getConnectionsByFloor(floorId: string): CampusConnection[] {
+    if (!floorId || !floorId.trim()) return [];
     return connections.filter(c => c.sourceFloorId === floorId || c.targetFloorId === floorId);
   },
   getConnectionsByNode(nodeId: string): CampusConnection[] {

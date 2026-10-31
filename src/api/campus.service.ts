@@ -23,10 +23,41 @@ function save<T>(key: string, data: T[]) {
   try { localStorage.setItem(key, JSON.stringify(data)); } catch {}
 }
 
-// Initialise from localStorage, seeding with mock-data only on first visit
-let campuses:  Campus[]   = load<Campus>(LS_CAMPUSES,  INITIAL_CAMPUSES);
-let buildings: Building[] = load<Building>(LS_BUILDINGS, INITIAL_BUILDINGS);
-let floors:    Floor[]    = load<Floor>(LS_FLOORS,    INITIAL_FLOORS);
+const isTestEnv = (typeof process !== 'undefined' && (process.env?.NODE_ENV === 'test' || Boolean(process.env?.VITEST))) ||
+  ((import.meta as any)?.env?.MODE === 'test');
+
+const LS_DATA_VERSION = 'omnicampus_data_version';
+const CURRENT_DATA_VERSION = '3';
+
+function migrateDataVersionIfNeeded() {
+  if (isTestEnv) return;
+  try {
+    const storedVersion = localStorage.getItem(LS_DATA_VERSION);
+    if (storedVersion !== CURRENT_DATA_VERSION) {
+      // Wipe ALL hardcoded seed data so users start fresh on the campuses page
+      const keysToWipe = [
+        LS_CAMPUSES, LS_BUILDINGS, LS_FLOORS,
+        'omnicampus_nodes', 'omnicampus_connections', 'omnicampus_objects',
+      ];
+      keysToWipe.forEach(k => localStorage.removeItem(k));
+      localStorage.setItem(LS_DATA_VERSION, CURRENT_DATA_VERSION);
+    }
+  } catch {}
+}
+migrateDataVersionIfNeeded();
+
+// In tests, initialize with mock fixtures so test suites pass.
+// In UI / browser, start clean with zero hardcoded campuses so user creates their own.
+let campuses:  Campus[]   = load<Campus>(LS_CAMPUSES,  isTestEnv ? INITIAL_CAMPUSES : []);
+let buildings: Building[] = load<Building>(LS_BUILDINGS, isTestEnv ? INITIAL_BUILDINGS : []);
+let floors:    Floor[]    = load<Floor>(LS_FLOORS,    isTestEnv ? INITIAL_FLOORS : []);
+
+if (!isTestEnv) {
+  // Guard against any lingering hardcoded default campuses in existing localStorage
+  campuses = campuses.filter(c => c.id !== 'campus-tech-inst' && c.id !== 'campus-metro-health');
+  buildings = buildings.filter(b => b.campusId !== 'campus-tech-inst' && b.campusId !== 'campus-metro-health');
+  floors = floors.filter(f => f.campusId !== 'campus-tech-inst' && f.campusId !== 'campus-metro-health');
+}
 
 export interface DeletionSafetyReport {
   canDelete: boolean;

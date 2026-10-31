@@ -24,7 +24,7 @@ export type ObjectStatus =
   | 'under_maintenance'
   | 'demolished';
 
-export type GeometryRepresentation = 'point' | 'polyline' | 'polygon' | 'circle' | 'ellipse' | 'none';
+export type GeometryRepresentation = 'point' | 'polyline' | 'polygon' | 'circle' | 'ellipse' | 'none' | 'image';
 
 export type NodeType =
   | 'waypoint'

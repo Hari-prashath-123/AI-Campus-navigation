@@ -4,7 +4,7 @@ import { SpatialNode, CampusConnection, SpatialNodeType, ConnectionType } from '
 import { Input } from '../ui/Input';
 import {
   Layers, Loader2, Ruler, Copy, X, Trash2, MapPin, GitBranch,
-  DoorOpen, Image, Upload, RotateCcw, Maximize2,
+  DoorOpen, Image, Upload, Sliders, RotateCcw, RotateCw, RefreshCw, Maximize2,
   AlignLeft, AlignCenter, AlignRight,
   ShieldCheck, Check
 } from 'lucide-react';
@@ -12,6 +12,8 @@ import { objectTypeService } from '../../api/object-type.service';
 import { Button } from '../ui/Button';
 
 interface EditorSidebarProps {
+  onOpenRoomInterior?: (roomId: string) => void;
+  isRoomInteriorMode?: boolean;
   selectedShapes: EditorShape[];
   updateShape: (id: string, updates: Partial<EditorShape>) => void;
   onDuplicate: () => void;
@@ -64,6 +66,8 @@ const CONNECTION_TYPES: { value: ConnectionType; label: string }[] = [
 ];
 
 export const EditorSidebar: React.FC<EditorSidebarProps> = ({
+  onOpenRoomInterior,
+  isRoomInteriorMode = false,
   selectedShapes,
   updateShape,
   onDuplicate,
@@ -97,6 +101,7 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
   const [refOffsetY, setRefOffsetY] = useState<number>(activeFloor?.overlayConfig?.offsetY ?? 0);
   const [refRotation, setRefRotation] = useState<number>(activeFloor?.overlayConfig?.rotationDegrees ?? 0);
   const [isSavedFeedback, setIsSavedFeedback] = useState(false);
+  const [activeTab, setActiveTab] = useState<'properties' | 'floor'>('properties');
 
   // Sync when floor changes
   useEffect(() => {
@@ -111,6 +116,12 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
   }, [activeFloor?.id, activeFloor?.planImageUrl]);
 
   const shape = selectedShapes.length === 1 ? selectedShapes[0] : null;
+
+  useEffect(() => {
+    if (shape || selectedNode || selectedEdge || selectedShapes.length > 0) {
+      setActiveTab('properties');
+    }
+  }, [shape?.id, selectedNode?.id, selectedEdge?.id, selectedShapes.length]);
 
   useEffect(() => {
     if (shape && shape.objectTypeId && shape.objectTypeId !== 'generic') {
@@ -181,10 +192,38 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
     setTimeout(() => setIsSavedFeedback(false), 2000);
   };
 
+  const renderTabBar = (currentTab: 'properties' | 'floor') => (
+    <div className="flex border-b border-slate-200 bg-slate-50 text-xs font-medium shrink-0">
+      <button
+        onClick={() => setActiveTab('properties')}
+        className={`flex-1 py-2 px-3 flex items-center justify-center gap-1.5 transition-colors border-b-2 ${
+          currentTab === 'properties'
+            ? 'border-blue-600 text-blue-700 font-semibold bg-white'
+            : 'border-transparent text-slate-500 hover:text-slate-800'
+        }`}
+      >
+        <Sliders size={13} />
+        <span>Properties</span>
+      </button>
+      <button
+        onClick={() => setActiveTab('floor')}
+        className={`flex-1 py-2 px-3 flex items-center justify-center gap-1.5 transition-colors border-b-2 ${
+          currentTab === 'floor'
+            ? 'border-blue-600 text-blue-700 font-semibold bg-white'
+            : 'border-transparent text-slate-500 hover:text-slate-800'
+        }`}
+      >
+        <Layers size={13} />
+        <span>Floor & Reference</span>
+      </button>
+    </div>
+  );
+
   // ── 1. SELECTED NODE INSPECTOR ──────────────────────────────────────────────
-  if (selectedNode) {
+  if (activeTab === 'properties' && selectedNode) {
     return (
       <div className="w-80 bg-white border-l border-slate-200 h-full flex flex-col shadow-sm z-10">
+        {renderTabBar('properties')}
         <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
@@ -263,9 +302,10 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
   }
 
   // ── 2. SELECTED CONNECTION (EDGE) INSPECTOR ─────────────────────────────────
-  if (selectedEdge) {
+  if (activeTab === 'properties' && selectedEdge) {
     return (
       <div className="w-80 bg-white border-l border-slate-200 h-full flex flex-col shadow-sm z-10">
+        {renderTabBar('properties')}
         <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center">
@@ -392,11 +432,12 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
   }
 
   // ── 3. MULTI-SELECTION STATE ────────────────────────────────────────────────
-  if (selectedShapes.length > 1) {
+  if (activeTab === 'properties' && selectedShapes.length > 1) {
     const totalAreaM2 = selectedShapes.reduce((acc, s) => acc + (s.realWorld?.areaM2 || 0), 0);
 
     return (
       <div className="w-80 bg-white border-l border-slate-200 h-full flex flex-col shadow-sm z-10">
+        {renderTabBar('properties')}
         <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
           <div>
             <h3 className="font-semibold text-slate-900 text-sm">Multiple Objects</h3>
@@ -491,7 +532,7 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
   }
 
   // ── 4. SINGLE SHAPE SELECTED ────────────────────────────────────────────────
-  if (shape) {
+  if (activeTab === 'properties' && shape) {
     const handleAttributeChange = (key: string, value: any) => {
       const updatedAttributes = { ...(shape.attributes || {}), [key]: value };
       updateShape(shape.id, { attributes: updatedAttributes });
@@ -499,6 +540,7 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
 
     return (
       <div className="w-80 bg-white border-l border-slate-200 h-full flex flex-col shadow-sm z-10">
+        {renderTabBar('properties')}
         <div className="p-4 border-b border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-3">
             {/* Colour swatch – click to open native colour picker */}
@@ -602,6 +644,22 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
             </div>
           </div>
 
+          {/* Room Interior Editor shortcut */}
+          {(shape as any).objectId && !isRoomInteriorMode && onOpenRoomInterior && (
+            <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg space-y-1.5">
+              <p className="text-[10px] font-semibold text-indigo-700 uppercase tracking-wider">Room Interior</p>
+              <p className="text-[10px] text-indigo-500">Edit cabins, desks, and indoor paths inside this room.</p>
+              <button
+                type="button"
+                onClick={() => onOpenRoomInterior((shape as any).objectId)}
+                className="w-full mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors"
+              >
+                <DoorOpen size={13} />
+                Open Room Interior Editor →
+              </button>
+            </div>
+          )}
+
           {/* Dynamic Properties from ObjectType */}
           <div className="space-y-3">
             <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex justify-between">
@@ -631,84 +689,194 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
             ))}
           </div>
 
-          {/* Real-World Geometry */}
+          {/* Real-World Geometry & Dimensions */}
           <div className="space-y-3 pt-3 border-t border-slate-100">
-            <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-              <Ruler size={13} />
-              Authoritative Geometry
+            <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+              <span className="flex items-center gap-1.5"><Ruler size={13} /> Size & Geometry</span>
+              {shape.geometryType === 'image' && (
+                <span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded text-[10px] font-semibold">2D Element</span>
+              )}
             </h4>
 
-            {shape.realWorld ? (
-              <>
-                <div className="grid grid-cols-2 gap-2">
-                  <Input 
-                    label={`Origin X (${calibration.unitSystem === 'imperial' ? 'ft' : 'm'})`}
-                    type="number" 
-                    step="0.1"
-                    value={calibration.unitSystem === 'imperial' ? (shape.realWorld.originXMeters * 3.28084).toFixed(1) : shape.realWorld.originXMeters.toFixed(1)} 
+            {/* Width and Height in Meters & Pixels */}
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Width ({calibration.unitSystem === 'imperial' ? 'ft' : 'm'})
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number"
+                    step="0.2"
+                    min="0.5"
+                    value={
+                      shape.realWorld?.widthMeters !== undefined
+                        ? (calibration.unitSystem === 'imperial' ? (shape.realWorld.widthMeters * 3.28084).toFixed(1) : shape.realWorld.widthMeters.toFixed(1))
+                        : (shape.width ? (shape.width / (calibration.canvasWidthPx / calibration.realWidthMeters)).toFixed(1) : '10')
+                    }
                     onChange={e => {
                       const val = Number(e.target.value);
                       const meters = calibration.unitSystem === 'imperial' ? val / 3.28084 : val;
-                      updateShape(shape.id, { 
-                        x: meters * (calibration.canvasWidthPx / calibration.realWidthMeters),
-                      });
+                      const px = meters * (calibration.canvasWidthPx / calibration.realWidthMeters);
+                      updateShape(shape.id, { width: Math.max(10, Math.round(px)) });
                     }}
+                    className="w-full px-2 py-1 text-xs border border-slate-300 rounded font-mono"
                   />
-                  <Input 
-                    label={`Origin Y (${calibration.unitSystem === 'imperial' ? 'ft' : 'm'})`}
-                    type="number" 
-                    step="0.1"
-                    value={calibration.unitSystem === 'imperial' ? (shape.realWorld.originYMeters * 3.28084).toFixed(1) : shape.realWorld.originYMeters.toFixed(1)} 
-                    onChange={e => {
-                      const val = Number(e.target.value);
-                      const meters = calibration.unitSystem === 'imperial' ? val / 3.28084 : val;
-                      updateShape(shape.id, { 
-                        y: meters * (calibration.canvasHeightPx / calibration.realHeightMeters),
-                      });
-                    }}
-                  />
+                  <span className="text-[10px] text-slate-400 font-mono shrink-0">{shape.width || 0}px</span>
                 </div>
+              </div>
 
-                {(shape.geometryType === 'polygon' || shape.width !== undefined) && shape.realWorld.widthMeters !== undefined && shape.realWorld.heightMeters !== undefined && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <Input 
-                      label={`Width (${calibration.unitSystem === 'imperial' ? 'ft' : 'm'})`}
-                      type="number" 
-                      step="0.1"
-                      value={calibration.unitSystem === 'imperial' ? (shape.realWorld.widthMeters * 3.28084).toFixed(1) : shape.realWorld.widthMeters.toFixed(1)} 
-                      onChange={e => {
-                        const val = Number(e.target.value);
-                        const meters = calibration.unitSystem === 'imperial' ? val / 3.28084 : val;
-                        updateShape(shape.id, { 
-                          width: meters * (calibration.canvasWidthPx / calibration.realWidthMeters),
-                        });
-                      }}
-                    />
-                    <Input 
-                      label={`Height (${calibration.unitSystem === 'imperial' ? 'ft' : 'm'})`}
-                      type="number" 
-                      step="0.1"
-                      value={calibration.unitSystem === 'imperial' ? (shape.realWorld.heightMeters * 3.28084).toFixed(1) : shape.realWorld.heightMeters.toFixed(1)} 
-                      onChange={e => {
-                        const val = Number(e.target.value);
-                        const meters = calibration.unitSystem === 'imperial' ? val / 3.28084 : val;
-                        updateShape(shape.id, { 
-                          height: meters * (calibration.canvasHeightPx / calibration.realHeightMeters),
-                        });
-                      }}
-                    />
-                  </div>
-                )}
-                
-                {shape.realWorld.areaM2 !== undefined && (
-                  <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between text-xs">
-                    <span className="text-slate-500 font-medium">Calculated Area</span>
-                    <span className="font-bold text-slate-900 font-mono">{formatArea(shape.realWorld.areaM2, calibration.unitSystem)}</span>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="text-xs text-slate-400 italic">Measurements calculating...</div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Height ({calibration.unitSystem === 'imperial' ? 'ft' : 'm'})
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number"
+                    step="0.2"
+                    min="0.5"
+                    value={
+                      shape.realWorld?.heightMeters !== undefined
+                        ? (calibration.unitSystem === 'imperial' ? (shape.realWorld.heightMeters * 3.28084).toFixed(1) : shape.realWorld.heightMeters.toFixed(1))
+                        : (shape.height ? (shape.height / (calibration.canvasHeightPx / calibration.realHeightMeters)).toFixed(1) : '10')
+                    }
+                    onChange={e => {
+                      const val = Number(e.target.value);
+                      const meters = calibration.unitSystem === 'imperial' ? val / 3.28084 : val;
+                      const px = meters * (calibration.canvasHeightPx / calibration.realHeightMeters);
+                      updateShape(shape.id, { height: Math.max(10, Math.round(px)) });
+                    }}
+                    className="w-full px-2 py-1 text-xs border border-slate-300 rounded font-mono"
+                  />
+                  <span className="text-[10px] text-slate-400 font-mono shrink-0">{shape.height || 0}px</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Dimension nudge / crop adjustment */}
+            <div className="flex gap-1.5 pt-1">
+              <button
+                type="button"
+                onClick={() => updateShape(shape.id, { width: Math.max(10, (shape.width || 60) + 10) })}
+                className="flex-1 py-1 px-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded text-[11px] text-slate-600 font-medium"
+                title="Widen element (+10px)"
+              >
+                + Width
+              </button>
+              <button
+                type="button"
+                onClick={() => updateShape(shape.id, { width: Math.max(10, (shape.width || 60) - 10) })}
+                className="flex-1 py-1 px-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded text-[11px] text-slate-600 font-medium"
+                title="Narrow element (-10px)"
+              >
+                - Width
+              </button>
+              <button
+                type="button"
+                onClick={() => updateShape(shape.id, { height: Math.max(10, (shape.height || 40) + 10) })}
+                className="flex-1 py-1 px-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded text-[11px] text-slate-600 font-medium"
+                title="Taller element (+10px)"
+              >
+                + Height
+              </button>
+              <button
+                type="button"
+                onClick={() => updateShape(shape.id, { height: Math.max(10, (shape.height || 40) - 10) })}
+                className="flex-1 py-1 px-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded text-[11px] text-slate-600 font-medium"
+                title="Shorter element (-10px)"
+              >
+                - Height
+              </button>
+            </div>
+
+            {/* Rotation & Orientation Controls */}
+            <div className="pt-2 border-t border-slate-100 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                  <RotateCw size={13} className="text-blue-600" />
+                  Rotation & Angle
+                </span>
+                <span className="font-mono text-xs text-blue-600 font-bold">
+                  {Math.round(((shape.rotation || 0) % 360 + 360) % 360)}°
+                </span>
+              </div>
+
+              {/* Quick Rotation Buttons */}
+              <div className="grid grid-cols-4 gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const currentRot = shape.rotation || 0;
+                    const nextRot = Math.round((currentRot - 90) % 360);
+                    updateShape(shape.id, { rotation: nextRot < 0 ? nextRot + 360 : nextRot });
+                  }}
+                  className="flex items-center justify-center gap-1 py-1.5 px-2 bg-slate-50 hover:bg-blue-50 hover:text-blue-600 border border-slate-200 rounded text-[11px] font-medium transition-colors"
+                  title="Rotate 90 degrees Counter-Clockwise"
+                >
+                  <RotateCcw size={12} /> -90°
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const currentRot = shape.rotation || 0;
+                    const nextRot = Math.round((currentRot + 90) % 360);
+                    updateShape(shape.id, { rotation: nextRot });
+                  }}
+                  className="flex items-center justify-center gap-1 py-1.5 px-2 bg-slate-50 hover:bg-blue-50 hover:text-blue-600 border border-slate-200 rounded text-[11px] font-medium transition-colors"
+                  title="Rotate 90 degrees Clockwise"
+                >
+                  <RotateCw size={12} /> +90°
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const currentRot = shape.rotation || 0;
+                    const nextRot = Math.round((currentRot + 180) % 360);
+                    updateShape(shape.id, { rotation: nextRot });
+                  }}
+                  className="flex items-center justify-center gap-1 py-1.5 px-2 bg-slate-50 hover:bg-blue-50 hover:text-blue-600 border border-slate-200 rounded text-[11px] font-medium transition-colors"
+                  title="Rotate 180 degrees"
+                >
+                  <RefreshCw size={11} /> 180°
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateShape(shape.id, { rotation: 0 })}
+                  className="flex items-center justify-center py-1.5 px-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded text-[11px] font-medium text-slate-600 transition-colors"
+                  title="Reset rotation to 0 degrees"
+                >
+                  Reset
+                </button>
+              </div>
+
+              {/* Rotation Slider */}
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  type="range"
+                  min="0"
+                  max="360"
+                  step="5"
+                  value={Math.round(((shape.rotation || 0) % 360 + 360) % 360)}
+                  onChange={e => updateShape(shape.id, { rotation: Number(e.target.value) })}
+                  className="flex-1 accent-blue-600 cursor-pointer h-1.5 bg-slate-200 rounded-lg"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="360"
+                  value={Math.round(((shape.rotation || 0) % 360 + 360) % 360)}
+                  onChange={e => updateShape(shape.id, { rotation: Number(e.target.value) })}
+                  className="w-14 px-1.5 py-0.5 text-xs border border-slate-300 rounded font-mono text-center"
+                />
+              </div>
+            </div>
+
+            {/* Calculated Area badge */}
+            {shape.realWorld?.areaM2 !== undefined && (
+              <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between text-xs">
+                <span className="text-slate-500 font-medium">Calculated Area</span>
+                <span className="font-bold text-slate-900 font-mono">{formatArea(shape.realWorld.areaM2, calibration.unitSystem)}</span>
+              </div>
             )}
           </div>
         </div>
@@ -719,17 +887,37 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
   // ── 5. DEFAULT STATE (CANVAS & FLOOR PROPERTIES + REFERENCE IMAGE LAYER) ────
   return (
     <div className="w-80 bg-white border-l border-slate-200 h-full flex flex-col shadow-sm z-10">
-      
+        {renderTabBar(activeTab)}
       {/* Header */}
       <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/70">
         <div className="flex items-center gap-2">
-          <Layers size={16} className="text-blue-600" />
-          <h3 className="font-semibold text-slate-900 text-sm">Floor & Reference</h3>
+          {activeTab === 'properties' ? <Sliders size={16} className="text-blue-600" /> : <Layers size={16} className="text-blue-600" />}
+          <h3 className="font-semibold text-slate-900 text-sm">{activeTab === 'properties' ? 'Element Properties' : 'Floor & Reference'}</h3>
         </div>
         <Button variant="ghost" size="sm" onClick={closeSidebar} title="Close Panel">
           <X size={14} />
         </Button>
       </div>
+
+      {activeTab === 'properties' ? (
+        <div className="p-6 flex-1 flex flex-col items-center justify-center text-center space-y-3">
+          <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shadow-inner">
+            <Sliders size={22} />
+          </div>
+          <div>
+            <h4 className="font-semibold text-slate-800 text-sm">No Element Selected</h4>
+            <p className="text-xs text-slate-500 mt-1 max-w-[220px]">
+              Click on any building, road, compound wall, gate, or tree to rename and edit its properties.
+            </p>
+          </div>
+          <button
+            onClick={() => setActiveTab('floor')}
+            className="mt-2 text-xs font-medium text-blue-600 hover:text-blue-800 underline"
+          >
+            View Floor & Blueprint Reference →
+          </button>
+        </div>
+      ) : (
 
       <div className="p-4 flex-1 overflow-y-auto space-y-5 text-xs">
         
@@ -934,6 +1122,7 @@ export const EditorSidebar: React.FC<EditorSidebarProps> = ({
           )}
         </div>
       </div>
+      )}
     </div>
   );
 };

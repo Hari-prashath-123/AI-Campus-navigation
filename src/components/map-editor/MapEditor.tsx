@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   EditorShape, EditorTool, Point2D, MapCalibration, DEFAULT_CALIBRATION,
   pxToMeters, formatLength, LayerVisibility, Campus, Building, Floor, FloorOverlayConfig
@@ -8,6 +8,8 @@ import { useHistory } from '../../hooks/useHistory';
 import { useNavStore } from '../../hooks/useNavStore';
 import { useObjectStore } from '../../hooks/useObjectStore';
 import { campusService } from '../../api/campus.service';
+import { objectStore } from '../../api/object.store';
+import { MapObject } from '../../types/object';
 import { navStore } from '../../api/nav.store';
 import { CanvasStage } from './CanvasStage';
 import { EditorSidebar } from './EditorSidebar';
@@ -17,6 +19,8 @@ import { MeasurementOverlay } from './MeasurementOverlay';
 import { LayerPanel } from './LayerPanel';
 import { ValidationPanel } from './ValidationPanel';
 import { FloorConnectorModal } from './FloorConnectorModal';
+import { ElementsPanel } from './ElementsPanel';
+import { svgToDataUrl } from '../../data/map-elements';
 import { MapImportExportModal } from './MapImportExportModal';
 import { validateCampusGraph } from '../../utils/graph-validation';
 import { CampusGraphGenerator } from '../../api/graph-generator.service';
@@ -25,9 +29,9 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Settings2, CheckCircle2, Clock, AlertTriangle,
   Undo2, Redo2, Trash2, Grid3X3,
-  ZoomIn, ZoomOut, Eye, Save, ChevronRight, Layers,
+  ZoomIn, ZoomOut, Eye, Save, ChevronRight, DoorOpen, Layers,
   ShieldCheck, Maximize2, Download,
-  Landmark, Building2, HelpCircle, Keyboard, X, Sparkles
+  Landmark, Building2, HelpCircle, Keyboard, X, Sparkles, LayoutGrid
 } from 'lucide-react';
 
 interface MapEditorProps {
@@ -35,14 +39,25 @@ interface MapEditorProps {
   campusId?: string;
   buildingId?: string;
   campus?: Campus | null;
+  roomId?: string;
 }
 
 export const MapEditor: React.FC<MapEditorProps> = ({
   floorId: propFloorId,
   campusId: propCampusId,
   buildingId: propBuildingId,
+  roomId: propRoomId,
 }) => {
-  // ── Hierarchy State (Campus, Building, Floor) ──────────────────────────────
+  // â”€â”€ Left Panel Tab State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [leftPanelTab, setLeftPanelTab] = useState<'tools' | 'elements'>('tools');
+  /** Stage viewport â€“ kept in sync via onViewportChange so ElementsPanel can compute drop coords */
+  const [stageViewport, setStageViewport] = useState<{ scale: number; position: { x: number; y: number } }>({
+    scale: 1,
+    position: { x: 0, y: 0 },
+  });
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
+
+  // â”€â”€ Hierarchy State (Campus, Building, Floor) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [campuses, setCampuses] = useState<Campus[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [floors, setFloors] = useState<Floor[]>([]);
@@ -50,41 +65,108 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   const [activeCampusId, setActiveCampusId] = useState<string>(propCampusId || '');
   const [activeBuildingId, setActiveBuildingId] = useState<string>(propBuildingId || '');
   const [activeFloorId, setActiveFloorId] = useState<string>(propFloorId || '');
+  const [activeRoomId, setActiveRoomId] = useState<string>(propRoomId || '');
+  const [roomObject, setRoomObject] = useState<MapObject | null>(null);
+
+  // Sync propRoomId
+  useEffect(() => {
+    if (propRoomId !== activeRoomId) {
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      setShapes([]);
+      prevShapesHash.current = '';
+      setActiveRoomId(propRoomId || '');
+    }
+  }, [propRoomId]);
+
+  // Load room details if activeRoomId is set
+  useEffect(() => {
+    if (activeRoomId) {
+      const obj = objectStore.getById(activeRoomId);
+      setRoomObject(obj || null);
+    } else {
+      setRoomObject(null);
+    }
+  }, [activeRoomId]);
+
+  // Keep internal selection synced when route or props change
+  useEffect(() => {
+    if (propCampusId && propCampusId !== activeCampusId) {
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      setShapes([]);
+      prevShapesHash.current = '';
+      setActiveCampusId(propCampusId);
+    }
+  }, [propCampusId]);
+
+  useEffect(() => {
+    if (propBuildingId && propBuildingId !== activeBuildingId) {
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      setShapes([]);
+      prevShapesHash.current = '';
+      setActiveBuildingId(propBuildingId);
+    }
+  }, [propBuildingId]);
+
+  useEffect(() => {
+    if (propFloorId && propFloorId !== activeFloorId) {
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      setShapes([]);
+      prevShapesHash.current = '';
+      setActiveFloorId(propFloorId);
+    }
+  }, [propFloorId]);
 
   // Load campus hierarchy
   useEffect(() => {
     campusService.getCampuses().then(res => {
       if (res.success && res.data.length > 0) {
         setCampuses(res.data);
-        if (!activeCampusId) {
-          const defaultCampus = propCampusId || res.data[0].id;
-          setActiveCampusId(defaultCampus);
+        if (!activeCampusId || !res.data.some(c => c.id === activeCampusId)) {
+          const match = propCampusId && res.data.some(c => c.id === propCampusId) ? propCampusId : res.data[0].id;
+          setActiveCampusId(match);
         }
       }
     });
   }, [propCampusId]);
 
   useEffect(() => {
-    if (!activeCampusId) return;
+    if (!activeCampusId) {
+      setBuildings([]);
+      setActiveBuildingId('');
+      setFloors([]);
+      setActiveFloorId('');
+      return;
+    }
     campusService.getBuildingsByCampus(activeCampusId).then(res => {
       if (res.success && res.data) {
         setBuildings(res.data);
-        if (!activeBuildingId || !res.data.some(b => b.id === activeBuildingId)) {
-          const defaultBuilding = propBuildingId || (res.data[0]?.id || '');
-          setActiveBuildingId(defaultBuilding);
+        if (propBuildingId) {
+          const matchProp = res.data.find(b => b.id === propBuildingId)?.id;
+          setActiveBuildingId(matchProp || res.data[0]?.id || '');
+        } else {
+          // Stay on Campus Overview when no specific building was requested in props
+          setActiveBuildingId('');
         }
       }
     });
   }, [activeCampusId, propBuildingId]);
 
   useEffect(() => {
-    if (!activeBuildingId) return;
+    if (!activeBuildingId) {
+      setFloors([]);
+      setActiveFloorId('');
+      return;
+    }
     campusService.getFloorsByBuilding(activeBuildingId).then(res => {
       if (res.success && res.data) {
         setFloors(res.data);
-        if (!activeFloorId || !res.data.some(f => f.id === activeFloorId)) {
-          const defaultFloor = propFloorId || (res.data[0]?.id || '');
-          setActiveFloorId(defaultFloor);
+        if (propFloorId) {
+          const matchProp = res.data.find(f => f.id === propFloorId)?.id;
+          setActiveFloorId(matchProp || res.data[0]?.id || '');
+        } else {
+          // If a building is selected in dropdown without floor prop, default to its ground floor
+          const ground = res.data.find(f => f.level === 0 || f.level === 1) || res.data[0];
+          setActiveFloorId(ground?.id || '');
         }
       }
     });
@@ -94,7 +176,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   const activeBuilding = useMemo(() => buildings.find(b => b.id === activeBuildingId) || null, [buildings, activeBuildingId]);
   const activeFloor = useMemo(() => floors.find(f => f.id === activeFloorId) || null, [floors, activeFloorId]);
 
-  // ── Floor Plan Reference Image & Overlay State ──────────────────────────────
+  // â”€â”€ Floor Plan Reference Image & Overlay State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [floorPlanUrl, setFloorPlanUrl] = useState<string>('');
   const [floorOverlay, setFloorOverlay] = useState<FloorOverlayConfig>({
     opacity: 0.65,
@@ -124,9 +206,9 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     }
   }, [activeFloor]);
 
-  // ── Unified Stores ──────────────────────────────────────────────────────────
+  // â”€â”€ Unified Stores â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const {
-    nodes: floorNodes,
+    nodes: rawFloorNodes,
     connections: campusConnections,
     createNode,
     updateNode,
@@ -143,7 +225,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     deleteObject,
   } = useObjectStore({ campusId: activeCampusId, floorId: activeFloorId });
 
-  // ── Editor Tools & Selection ───────────────────────────────────────────────
+  // â”€â”€ Editor Tools & Selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [tool, setTool] = useState<EditorTool>('select');
   const [activeType, setActiveType] = useState<ObjectType | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -153,6 +235,15 @@ export const MapEditor: React.FC<MapEditorProps> = ({
 
   // Right sidebar open/closed (React-controlled, replaces DOM classList hack)
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+  // Auto-open sidebar and clear node/edge selection whenever shapes are selected
+  useEffect(() => {
+    if (selectedIds.length > 0) {
+      setIsSidebarOpen(true);
+      setSelectedNode(null);
+      setSelectedEdge(null);
+    }
+  }, [selectedIds]);
 
   // Layer visibility
   const [layers, setLayers] = useState<LayerVisibility>({
@@ -194,10 +285,102 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   }>({ x: 0, y: 0, w: 0, h: 0, type: null, visible: false });
 
   // Shapes with undo/redo
-  const { state: shapes, set: setShapes, undo, redo, canUndo, canRedo } = useHistory([]);
+  const { state: shapes, set: setShapes, undo, redo, canUndo, canRedo, clearHistory } = useHistory([]);
+
+  // When editing building ground floor (level 0), project campus entrances onto outer dashed perimeter
+  const floorNodes = useMemo(() => {
+    if (activeRoomId) {
+      return [];
+    }
+    if (!activeBuildingId) {
+      return rawFloorNodes;
+    }
+    const isGround = !activeFloor || activeFloor.level === 0;
+    if (!isGround) return rawFloorNodes;
+
+    const buildingNodes = navStore.getNodesByBuilding(activeBuildingId);
+    const buildingEntrances = buildingNodes.filter(n => n.type === 'entrance' || n.type === 'outdoor_waypoint');
+
+    // Retrieve building shape from outer campus map to know its bounding box
+    let buildingShape: EditorShape | null = null;
+    const campusKeys = [`editor-shapes-${activeCampusId}`, `editor-shapes-${activeCampusId}--`];
+    for (const ck of campusKeys) {
+      const raw = localStorage.getItem(ck);
+      if (raw) {
+        try {
+          const arr: EditorShape[] = JSON.parse(raw);
+          const activeBldName = activeBuilding ? (typeof (activeBuilding as any).name === 'string' ? (activeBuilding as any).name.toLowerCase() : (activeBuilding.name?.en || '').toLowerCase()) : '';
+          const found = arr.find(s => s.objectId === activeBuildingId || s.id === activeBuildingId || (activeBldName && s.name.toLowerCase().includes(activeBldName)));
+          if (found) { buildingShape = found; break; }
+        } catch {}
+      }
+    }
+
+    const W = calibration.canvasWidthPx || 1200;
+    const H = calibration.canvasHeightPx || 960;
+
+    // Project entrance positions along the outer dashed perimeter lines of the floor map (Image 3)
+    const projectedEntrances = buildingEntrances.map(n => {
+      if (!buildingShape) return n;
+
+      const bx = buildingShape.x;
+      const by = buildingShape.y;
+      const bw = buildingShape.width || 120;
+      const bh = buildingShape.height || 100;
+
+      // Distance from entrance node to each edge of the building shape on the campus map
+      const distTop = Math.abs(n.coordinates.y - by);
+      const distBottom = Math.abs(n.coordinates.y - (by + bh));
+      const distLeft = Math.abs(n.coordinates.x - bx);
+      const distRight = Math.abs(n.coordinates.x - (bx + bw));
+      const minDist = Math.min(distTop, distBottom, distLeft, distRight);
+
+      // Relative position along the building width (0 to 1) and height (0 to 1)
+      const relX = Math.max(0.12, Math.min(0.88, (n.coordinates.x - bx) / bw));
+      const relY = Math.max(0.12, Math.min(0.88, (n.coordinates.y - by) / bh));
+
+      let px = n.coordinates.x;
+      let py = n.coordinates.y;
+
+      if (minDist === distBottom) {
+        // Bottom dashed edge (e.g. Main Entrance at bottom-center)
+        px = relX * W;
+        py = H - 6;
+      } else if (minDist === distTop) {
+        // Top dashed edge (e.g. Side Entrances at top edge)
+        px = relX * W;
+        py = 6;
+      } else if (minDist === distLeft) {
+        // Left dashed edge
+        px = 6;
+        py = relY * H;
+      } else {
+        // Right dashed edge
+        px = W - 6;
+        py = relY * H;
+      }
+
+      return {
+        ...n,
+        coordinates: { x: Math.round(px), y: Math.round(py) }
+      };
+    });
+
+    const map = new Map(rawFloorNodes.map(n => [n.id, n]));
+    projectedEntrances.forEach(n => {
+      if (!map.has(n.id)) map.set(n.id, n);
+    });
+
+    return Array.from(map.values());
+  }, [rawFloorNodes, activeBuildingId, activeFloor, activeCampusId, activeBuilding, calibration]);
 
   // Autosave & Persistence tracking
-  const getStorageKey = useCallback(() => `editor-shapes-${activeCampusId}-${activeBuildingId}-${activeFloorId}`, [activeCampusId, activeBuildingId, activeFloorId]);
+  const getStorageKey = useCallback(() => {
+    if (activeRoomId) {
+      return `editor-shapes-${activeCampusId}-${activeBuildingId}-${activeFloorId}-${activeRoomId}`;
+    }
+    return `editor-shapes-${activeCampusId}-${activeBuildingId}-${activeFloorId}`;
+  }, [activeCampusId, activeBuildingId, activeFloorId, activeRoomId]);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving'>('saved');
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -208,12 +391,80 @@ export const MapEditor: React.FC<MapEditorProps> = ({
 
   // Load from local storage or hydrate from objectStore
   useEffect(() => {
+    // If no campus is selected or if a floor route is waiting for floorId, keep canvas clear
+    if (!activeCampusId || (propFloorId && !activeFloorId) || (propRoomId && !activeRoomId)) {
+      clearHistory([]);
+      prevShapeCount.current = 0;
+      prevShapesHash.current = '[]';
+      return;
+    }
+
     const key = getStorageKey();
     const data = localStorage.getItem(key);
+
+    // Room Interior Mode: if saved data exists, verify it contains room boundary; otherwise generate fresh
+    if (activeRoomId) {
+      if (data) {
+        try {
+          const parsed = JSON.parse(data);
+          if (Array.isArray(parsed) && parsed.some(s => s.id === `room_boundary_${activeRoomId}` || s.attributes?.isRoomPerimeter)) {
+            clearHistory(parsed);
+            prevShapeCount.current = parsed.length;
+            prevShapesHash.current = JSON.stringify(parsed);
+            setSaveStatus('saved');
+            return;
+          }
+        } catch (e) {}
+      }
+      // Generate initial room boundary & door
+      const rObj = objectStore.getById(activeRoomId);
+      const rName = rObj ? (typeof rObj.name === 'string' ? rObj.name : rObj.name.en) : 'Room';
+      const initialRoomShapes: EditorShape[] = [
+        {
+          id: `room_boundary_${activeRoomId}`,
+          objectTypeId: 'room_boundary',
+          geometryType: 'rectangle' as any,
+          x: 180,
+          y: 120,
+          width: 840,
+          height: 560,
+          rotation: 0,
+          scaleX: 1,
+          scaleY: 1,
+          points: [],
+          name: `${rName} Perimeter Walls`,
+          color: '#3b82f6',
+          isLocked: true,
+          attributes: { isRoomPerimeter: true },
+        },
+        {
+          id: `room_door_${activeRoomId}`,
+          objectTypeId: 'entrance',
+          geometryType: 'point',
+          x: 600,
+          y: 680,
+          width: 24,
+          height: 24,
+          rotation: 0,
+          scaleX: 1,
+          scaleY: 1,
+          points: [],
+          name: `${rName} Entrance Door`,
+          color: '#10b981',
+          attributes: { isDoor: true, isEntrance: true },
+        },
+      ];
+      clearHistory(initialRoomShapes);
+      prevShapeCount.current = initialRoomShapes.length;
+      prevShapesHash.current = JSON.stringify(initialRoomShapes);
+      setSaveStatus('unsaved');
+      return;
+    }
+
     if (data) {
       try {
         const parsed = JSON.parse(data);
-        setShapes(parsed);
+        clearHistory(parsed);
         prevShapeCount.current = parsed.length;
         prevShapesHash.current = JSON.stringify(parsed);
         setSaveStatus('saved');
@@ -223,53 +474,58 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       }
     }
 
-    // Fallback: Hydrate shapes from objectStore objects on this floor
-    if (floorObjects.length > 0) {
-      const pxPerM = calibration.canvasWidthPx / calibration.realWidthMeters;
-      const hydratedShapes: EditorShape[] = floorObjects.map(obj => {
-        const geomType = obj.geometryType || 'polygon';
-        const x = Math.round(obj.coordinates.x * pxPerM);
-        const y = Math.round(obj.coordinates.y * pxPerM);
-        const name = typeof obj.name === 'string' ? obj.name : obj.name.en || obj.code;
-        return {
-          id: `shape_${obj.id}`,
-          objectId: obj.id,
-          objectTypeId: obj.objectTypeId || 'generic',
-          geometryType: geomType,
-          points: [x, y, x + 60, y + 40],
-          x,
-          y,
-          width: 60,
-          height: 40,
-          rotation: 0,
-          scaleX: 1,
-          scaleY: 1,
-          name,
-          color: '#3b82f6',
-          attributes: {
-            associatedNodeId: obj.associatedNodeId,
-            ...(obj.attributes || {}),
-          },
-          realWorld: {
-            originXMeters: obj.coordinates.x,
-            originYMeters: obj.coordinates.y,
-            widthMeters: 60 / pxPerM,
-            heightMeters: 40 / pxPerM,
-            areaM2: (60 / pxPerM) * (40 / pxPerM),
-            rotationDeg: 0,
-          },
-        };
-      });
-      setShapes(hydratedShapes);
-      prevShapeCount.current = hydratedShapes.length;
-      prevShapesHash.current = JSON.stringify(hydratedShapes);
-    } else {
-      setShapes([]);
-      prevShapeCount.current = 0;
-      prevShapesHash.current = '[]';
+    // Fallback: ONLY hydrate shapes from objectStore objects on THIS specific floor
+    if (activeFloorId) {
+      const currentFloorObjs = objectStore.getByFloor(activeFloorId);
+      if (currentFloorObjs.length > 0) {
+        const pxPerM = calibration.canvasWidthPx / calibration.realWidthMeters;
+        const hydratedShapes: EditorShape[] = currentFloorObjs.map((obj: MapObject) => {
+          const geomType = obj.geometryType || 'polygon';
+          const x = Math.round(obj.coordinates.x * pxPerM);
+          const y = Math.round(obj.coordinates.y * pxPerM);
+          const name = typeof obj.name === 'string' ? obj.name : obj.name.en || obj.code;
+          return {
+            id: `shape_${obj.id}`,
+            objectId: obj.id,
+            objectTypeId: obj.objectTypeId || 'generic',
+            geometryType: geomType,
+            points: [x, y, x + 60, y + 40],
+            x,
+            y,
+            width: 60,
+            height: 40,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            name,
+            color: '#3b82f6',
+            attributes: {
+              associatedNodeId: obj.associatedNodeId,
+              ...(obj.attributes || {}),
+            },
+            realWorld: {
+              originXMeters: obj.coordinates.x,
+              originYMeters: obj.coordinates.y,
+              widthMeters: 60 / pxPerM,
+              heightMeters: 40 / pxPerM,
+              areaM2: (60 / pxPerM) * (40 / pxPerM),
+              rotationDeg: 0,
+            },
+          };
+        });
+        clearHistory(hydratedShapes);
+        prevShapeCount.current = hydratedShapes.length;
+        prevShapesHash.current = JSON.stringify(hydratedShapes);
+        setSaveStatus('saved');
+        return;
+      }
     }
+
+    setShapes([]);
+    prevShapeCount.current = 0;
+    prevShapesHash.current = '[]';
     setSaveStatus('saved');
-  }, [getStorageKey, activeFloorId]);
+  }, [getStorageKey, activeFloorId, activeCampusId, propFloorId, activeRoomId, calibration]);
 
   // Mark unsaved when shapes change (hash-based, not just count)
   useEffect(() => {
@@ -302,6 +558,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       const ok = window.confirm('You have unsaved changes on this floor. Discard and switch campus?');
       if (!ok) return;
     }
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     // Clear shapes immediately so no stale data bleeds into the new campus
     setShapes([]);
     prevShapesHash.current = '';
@@ -315,8 +572,9 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       const ok = window.confirm('You have unsaved changes on this floor. Discard and switch building?');
       if (!ok) return;
     }
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     // Clear shapes immediately so no stale data bleeds into the new building
-    setShapes([]);
+    clearHistory([]);
     prevShapesHash.current = '';
     setActiveBuildingId(newBuildingId);
     setActiveFloorId('');
@@ -327,14 +585,17 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       const ok = window.confirm('You have unsaved changes on this floor. Discard and switch floor?');
       if (!ok) return;
     }
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     // Clear shapes immediately so no stale data bleeds into the new floor
-    setShapes([]);
+    clearHistory([]);
     prevShapesHash.current = '';
     setActiveFloorId(newFloorId);
   };
 
   // Persist shapes & floor overlay through backend
   const performSave = useCallback(async () => {
+    if (!activeCampusId) return;
+    if (propFloorId && !activeFloorId) return;
     setSaveStatus('saving');
 
     // 1. Save shapes to localStorage
@@ -343,15 +604,19 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     // 2. Persist shapes into objectStore
     shapes.forEach(shape => {
       if (shape.objectId) {
-        updateObject(shape.objectId, {
-          name: { en: shape.name },
-          coordinates: {
-            x: shape.realWorld?.originXMeters ?? pxToMeters(shape.x, calibration),
-            y: shape.realWorld?.originYMeters ?? pxToMeters(shape.y, calibration),
-          },
-          associatedNodeId: shape.attributes?.associatedNodeId,
-          attributes: shape.attributes,
-        });
+        try {
+          updateObject(shape.objectId, {
+            name: { en: shape.name },
+            coordinates: {
+              x: Math.max(0, shape.realWorld?.originXMeters ?? pxToMeters(Math.max(0, shape.x), calibration)),
+              y: Math.max(0, shape.realWorld?.originYMeters ?? pxToMeters(Math.max(0, shape.y), calibration)),
+            },
+            associatedNodeId: shape.attributes?.associatedNodeId,
+            attributes: shape.attributes,
+          });
+        } catch (err) {
+          console.warn('Defensively caught coordinate save error:', err);
+        }
       }
     });
 
@@ -423,7 +688,8 @@ export const MapEditor: React.FC<MapEditorProps> = ({
           case 'r': setTool('rectangle'); break;
           case 'p': setTool('polygon'); break;
           case 'c': setTool('circle'); break;
-          case 'l': setTool('line'); break;
+          case 'l': setTool('path'); break;
+          case 'w': setTool('wall'); break;
           case 'm': setTool('point'); break;
           case 'n': setTool('add_node'); break;
           case 'e': setTool('add_edge'); break;
@@ -582,12 +848,16 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     setShapes(prev => prev.map(s => {
       if (s.id !== id) return s;
       const updated = { ...s, ...updates };
+      if ('x' in updates && updated.x !== undefined) updated.x = Math.max(0, updated.x);
+      if ('y' in updates && updated.y !== undefined) updated.y = Math.max(0, updated.y);
       if ('width' in updates || 'height' in updates || 'x' in updates || 'y' in updates) {
-        const wM = pxToMeters(updated.width || 0, calibration);
-        const hM = pxToMeters(updated.height || 0, calibration);
+        const wM = pxToMeters(Math.max(1, updated.width || 0), calibration);
+        const hM = pxToMeters(Math.max(1, updated.height || 0), calibration);
+        const xM = Math.max(0, pxToMeters(updated.x, calibration));
+        const yM = Math.max(0, pxToMeters(updated.y, calibration));
         updated.realWorld = {
-          originXMeters: pxToMeters(updated.x, calibration),
-          originYMeters: pxToMeters(updated.y, calibration),
+          originXMeters: xM,
+          originYMeters: yM,
           widthMeters: wM,
           heightMeters: hM,
           areaM2: wM * hM,
@@ -596,15 +866,19 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       }
 
       if (updated.objectId) {
-        updateObject(updated.objectId, {
-          name: { en: updated.name },
-          coordinates: {
-            x: updated.realWorld?.originXMeters || pxToMeters(updated.x, calibration),
-            y: updated.realWorld?.originYMeters || pxToMeters(updated.y, calibration),
-          },
-          associatedNodeId: updated.attributes?.associatedNodeId,
-          attributes: updated.attributes,
-        });
+        try {
+          updateObject(updated.objectId, {
+            name: { en: updated.name },
+            coordinates: {
+              x: Math.max(0, updated.realWorld?.originXMeters ?? pxToMeters(updated.x, calibration)),
+              y: Math.max(0, updated.realWorld?.originYMeters ?? pxToMeters(updated.y, calibration)),
+            },
+            associatedNodeId: updated.attributes?.associatedNodeId,
+            attributes: updated.attributes,
+          });
+        } catch (err) {
+          console.warn('Defensively caught coordinate update validation error:', err);
+        }
       }
       return updated;
     }));
@@ -613,10 +887,12 @@ export const MapEditor: React.FC<MapEditorProps> = ({
 
   // Finalize shape -> bridge to objectStore
   const handleShapeFinalized = useCallback((shape: EditorShape) => {
-    const xM = pxToMeters(shape.x, calibration);
-    const yM = pxToMeters(shape.y, calibration);
-    const wM = shape.width ? pxToMeters(shape.width, calibration) : 0;
-    const hM = shape.height ? pxToMeters(shape.height, calibration) : 0;
+    const safeX = Math.max(0, shape.x);
+    const safeY = Math.max(0, shape.y);
+    const xM = Math.max(0, pxToMeters(safeX, calibration));
+    const yM = Math.max(0, pxToMeters(safeY, calibration));
+    const wM = shape.width ? pxToMeters(Math.max(1, shape.width), calibration) : 0;
+    const hM = shape.height ? pxToMeters(Math.max(1, shape.height), calibration) : 0;
 
     let targetObjectId = shape.objectId || pendingObjectId;
 
@@ -659,7 +935,91 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     setSelectedIds([withRealWorld.id]);
     setPendingObjectId(null);
     setSaveStatus('unsaved');
+    setTool('select');
   }, [calibration, pendingObjectId, activeCampusId, activeBuildingId, activeFloorId, activeType, createObject, updateObject, setShapes]);
+
+  // â”€â”€ Element Drop Handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleElementDrop = useCallback((element: import('../../data/map-elements').MapElement, canvasX: number, canvasY: number) => {
+    // 1. Check if dropped on top of an existing building or room shape
+    const targetShape = shapes.find(s => {
+      const sw = s.width || 20;
+      const sh = s.height || 20;
+      return canvasX >= s.x && canvasX <= (s.x + sw) &&
+             canvasY >= s.y && canvasY <= (s.y + sh);
+    });
+
+    if (targetShape) {
+      // Adapt directly to the building!
+      // The 2D element skins the building and takes its exact size (covers all space, no extra blue area)
+      updateShape(targetShape.id, {
+        geometryType: 'image',
+        elementKey: element.key,
+        elementDataUrl: svgToDataUrl(element.svg),
+        attributes: {
+          ...targetShape.attributes,
+          elementKey: element.key,
+          elementCategory: element.category,
+          elementSubcategory: element.subcategory,
+        },
+      });
+      setSelectedIds([targetShape.id]);
+      setSelectedNode(null);
+      setSelectedEdge(null);
+      setIsSidebarOpen(true);
+      setTool('select');
+      setSaveStatus('unsaved');
+      return;
+    }
+
+    // 2. Otherwise, place as a new element shape on the canvas
+    const newShape: EditorShape = {
+      id: uuidv4(),
+      objectTypeId: 'element',
+      geometryType: 'image' as any,
+      x: Math.round(canvasX - element.defaultWidth / 2),
+      y: Math.round(canvasY - element.defaultHeight / 2),
+      width: element.defaultWidth,
+      height: element.defaultHeight,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      points: [],
+      name: element.label,
+      color: '#6366f1',
+      elementKey: element.key,
+      elementDataUrl: svgToDataUrl(element.svg),
+      attributes: { elementCategory: element.category, elementSubcategory: element.subcategory },
+    };
+    handleShapeFinalized(newShape);
+    setSelectedIds([newShape.id]);
+    setSelectedNode(null);
+    setSelectedEdge(null);
+    setIsSidebarOpen(true);
+    setTool('select');
+    setSaveStatus('unsaved');
+  }, [shapes, updateShape, handleShapeFinalized]);
+
+  // One-click skinning: when a building shape is selected, clicking any element skins it immediately!
+  const handleElementClick = useCallback((element: import('../../data/map-elements').MapElement) => {
+    if (selectedIds.length === 1) {
+      const targetId = selectedIds[0];
+      const target = shapes.find(s => s.id === targetId);
+      if (target) {
+        updateShape(target.id, {
+          geometryType: 'image',
+          elementKey: element.key,
+          elementDataUrl: svgToDataUrl(element.svg),
+          attributes: {
+            ...target.attributes,
+            elementKey: element.key,
+            elementCategory: element.category,
+            elementSubcategory: element.subcategory,
+          },
+        });
+        setSaveStatus('unsaved');
+      }
+    }
+  }, [selectedIds, shapes, updateShape]);
 
   const handleSelectType = (type: ObjectType) => {
     setActiveType(type);
@@ -690,8 +1050,48 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       updatedAt: '',
     });
     setPendingObjectId(entity.id);
-    setTool(entity.type === 'building' ? 'rectangle' : 'point');
+    // When placing an unplaced room or building, set tool to rectangle so user can draw room boundaries
+    setTool('rectangle');
   };
+
+  const handleRoomDrop = useCallback((roomData: { id: string; name: string; category: string; code?: string }, canvasX: number, canvasY: number) => {
+    const rw = 140;
+    const rh = 90;
+    const newRoomShape: EditorShape = {
+      id: uuidv4(),
+      objectId: roomData.id,
+      objectTypeId: 'room',
+      geometryType: 'rectangle' as any,
+      x: Math.round(canvasX - rw / 2),
+      y: Math.round(canvasY - rh / 2),
+      width: rw,
+      height: rh,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      points: [],
+      name: roomData.name,
+      color: '#3b82f6',
+      attributes: {
+        category: roomData.category,
+        code: roomData.code,
+        isRoom: true,
+      },
+    };
+    handleShapeFinalized(newRoomShape);
+    setSelectedIds([newRoomShape.id]);
+    setSelectedNode(null);
+    setSelectedEdge(null);
+    setIsSidebarOpen(true);
+    setTool('select');
+    setSaveStatus('unsaved');
+  }, [handleShapeFinalized]);
+
+  const handleRoomPlaceDirect = useCallback((roomData: { id: string; name: string; category: string; code?: string }) => {
+    const cx = Math.round((-stageViewport.position.x + 600) / (stageViewport.scale || 1));
+    const cy = Math.round((-stageViewport.position.y + 450) / (stageViewport.scale || 1));
+    handleRoomDrop(roomData, Math.max(100, cx), Math.max(100, cy));
+  }, [handleRoomDrop, stageViewport]);
 
   const handleToggleLayer = (layerKey: keyof LayerVisibility) => {
     setLayers(prev => ({ ...prev, [layerKey]: !prev[layerKey] }));
@@ -732,7 +1132,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   return (
     <div className="flex flex-col w-full h-full bg-slate-100 overflow-hidden select-none">
 
-      {/* ── TOP TOOLBAR ──────────────────────────────────────────────────────── */}
+      {/* â”€â”€ TOP TOOLBAR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between shrink-0 shadow-xs z-20 gap-3">
         
         {/* 3-Level Hierarchy Navigator: Campus (Site) -> Building -> Floor */}
@@ -766,6 +1166,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
               className="bg-transparent font-semibold text-slate-800 text-xs focus:outline-none cursor-pointer"
               title="Building"
             >
+              <option value="">Campus Map (Site Overview)</option>
               {buildings.map(b => (
                 <option key={b.id} value={b.id}>
                   {typeof b.name === 'string' ? b.name : b.name.en || b.code}
@@ -781,7 +1182,10 @@ export const MapEditor: React.FC<MapEditorProps> = ({
             <Layers size={13} className="text-blue-700 shrink-0" />
             <select
               value={activeFloorId}
-              onChange={e => handleSelectFloor(e.target.value)}
+              onChange={e => {
+                handleSelectFloor(e.target.value);
+                setActiveRoomId('');
+              }}
               className="bg-transparent font-bold text-blue-800 text-xs focus:outline-none cursor-pointer"
               title="Floor Level"
             >
@@ -792,6 +1196,27 @@ export const MapEditor: React.FC<MapEditorProps> = ({
               ))}
             </select>
           </div>
+
+          {/* Level 3: Room Interior Pill (if active) */}
+          {activeRoomId && (
+            <>
+              <ChevronRight size={13} className="text-slate-300 shrink-0" />
+              <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded-lg px-2.5 py-1">
+                <DoorOpen size={13} className="text-indigo-700 shrink-0" />
+                <span className="font-bold text-indigo-900 text-xs truncate max-w-[150px]">
+                  {roomObject ? (typeof roomObject.name === 'string' ? roomObject.name : roomObject.name.en) : 'Room Interior'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveRoomId('')}
+                  title="Return to Floor Map"
+                  className="ml-1 text-indigo-500 hover:text-indigo-800 text-[10px] bg-indigo-100 hover:bg-indigo-200 px-1.5 py-0.5 rounded font-semibold transition-colors"
+                >
+                  ✕ Floor Map
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Center / Right Action Controls */}
@@ -944,22 +1369,69 @@ export const MapEditor: React.FC<MapEditorProps> = ({
         </div>
       </div>
 
-      {/* ── MAIN 3-PANE LAYOUT ───────────────────────────────────────────── */}
+      {/* â”€â”€ MAIN 3-PANE LAYOUT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex flex-1 overflow-hidden relative">
 
-        {/* LEFT: Object Palette & Drawing Tools */}
-        <ObjectPalette 
-          onSelectType={handleSelectType} 
-          activeTypeId={activeType?.id || null} 
-          campusId={activeCampusId} 
-          floorId={activeFloorId} 
-          placedObjectIds={shapes.map(s => s.objectId).filter(Boolean) as string[]}
-          onSelectUnplaced={handleSelectUnplaced}
-          activeTool={tool}
-          onSelectTool={setTool}
-          nodeTypeToCreate={nodeTypeToCreate}
-          onSelectNodeType={setNodeTypeToCreate}
-        />
+        {/* LEFT: Tabbed Left Panel â€” Tools/Types or Elements */}
+        <div className="flex flex-col h-full shrink-0" style={{ width: '256px' }}>
+          {/* Tab switcher */}
+          <div className="flex border-b border-slate-200 bg-slate-50 shrink-0">
+            <button
+              onClick={() => setLeftPanelTab('tools')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors ${
+                leftPanelTab === 'tools'
+                  ? 'text-blue-600 border-b-2 border-blue-600 bg-white'
+                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100'
+              }`}
+            >
+              <LayoutGrid size={12} />
+              Tools
+            </button>
+            <button
+              onClick={() => { setLeftPanelTab('elements'); setTool('select'); }}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors ${
+                leftPanelTab === 'elements'
+                  ? 'text-violet-600 border-b-2 border-violet-600 bg-white'
+                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100'
+              }`}
+            >
+              <Sparkles size={12} />
+              Elements
+            </button>
+          </div>
+
+          {/* Content area */}
+          <div className="flex-1 overflow-hidden">
+            {leftPanelTab === 'tools' ? (
+              <ObjectPalette 
+                onSelectType={handleSelectType} 
+                activeTypeId={activeType?.id || null} 
+                campusId={activeCampusId} 
+                floorId={activeFloorId} 
+                placedObjectIds={shapes.map(s => s.objectId).filter(Boolean) as string[]}
+                onSelectUnplaced={handleSelectUnplaced}
+                activeTool={tool}
+                onSelectTool={setTool}
+                nodeTypeToCreate={nodeTypeToCreate}
+                onSelectNodeType={setNodeTypeToCreate}
+                canvasContainerRef={canvasContainerRef}
+                stageScale={stageViewport.scale}
+                stagePosition={stageViewport.position}
+                onRoomDrop={handleRoomDrop}
+                onRoomPlaceDirect={handleRoomPlaceDirect}
+              />
+            ) : (
+              <ElementsPanel
+                onElementDrop={handleElementDrop}
+                onElementClick={handleElementClick}
+                canvasContainerRef={canvasContainerRef}
+                stageScale={stageViewport.scale}
+                stagePosition={stageViewport.position}
+                hasSelectedShape={selectedIds.length === 1}
+              />
+            )}
+          </div>
+        </div>
 
         {/* CENTER: Canvas */}
         <div className="flex-1 flex flex-col min-w-0 relative">
@@ -990,7 +1462,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
           {showPreview && (
             <div className="absolute inset-0 z-20 pointer-events-none border-4 border-emerald-400">
               <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-emerald-600 text-white text-xs font-bold px-4 py-1.5 rounded-full shadow-lg">
-                PREVIEW MODE — Interactive Inspection
+                PREVIEW MODE â€” Interactive Inspection
               </div>
             </div>
           )}
@@ -1034,14 +1506,16 @@ export const MapEditor: React.FC<MapEditorProps> = ({
           />
 
           {/* Central Canvas Stage */}
-          <div className="flex-1 w-full h-full relative overflow-hidden">
+          <div ref={canvasContainerRef} className="flex-1 w-full h-full relative overflow-hidden">
             <CanvasStage
               shapes={shapes}
               setShapes={setShapes}
               onShapeFinalized={handleShapeFinalized}
+              onShapeUpdated={updateShape}
               selectedIds={showPreview ? [] : selectedIds}
               setSelectedIds={showPreview ? () => {} : setSelectedIds}
               tool={showPreview ? 'select' : tool}
+              onToolChange={setTool}
               gridSize={gridSize}
               isSnapping={isSnapping}
               onCoordinatesChange={setPointerCoords}
@@ -1049,16 +1523,25 @@ export const MapEditor: React.FC<MapEditorProps> = ({
               calibration={calibration}
               onDraftMeasure={setDraftMeasure}
 
-              // Graph Network
-              nodes={floorNodes}
-              connections={campusConnections}
+              // Graph Network — hide floor nodes when in room interior mode
+              nodes={activeRoomId ? [] : floorNodes}
+              connections={activeRoomId ? [] : campusConnections}
               layers={layers}
               activeCampusId={activeCampusId}
               activeBuildingId={activeBuildingId}
               activeFloorId={activeFloorId}
               onNodeCreated={(node) => {
+                // When marking an entrance for a building, ensure it associates with that building's ground floor
+                if ((node.type === 'entrance' || node.type === 'outdoor_waypoint') && node.buildingId) {
+                  const bldGround = floors.find(f => f.buildingId === node.buildingId && (f.level === 0 || f.level === 1));
+                  if (bldGround && !node.floorId) {
+                    node.floorId = bldGround.id;
+                  }
+                }
                 createNode(node);
                 setSelectedNode(node);
+                setSelectedIds([]);
+                setIsSidebarOpen(true);
                 setSaveStatus('unsaved');
               }}
               onNodeUpdated={(id, patch) => {
@@ -1092,6 +1575,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
               overlayConfig={floorOverlay}
               onOverlayConfigChange={handleUpdateFloorOverlay}
               fitToViewTrigger={fitToViewTrigger}
+              onViewportChange={(scale, position) => setStageViewport({ scale, position })}
             />
 
             <MeasurementOverlay
@@ -1105,7 +1589,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
             />
           </div>
 
-          {/* ── BOTTOM STATUS BAR ────────────────────────────────────────── */}
+          {/* â”€â”€ BOTTOM STATUS BAR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
           <div className="bg-white border-t border-slate-200 px-4 py-1.5 flex items-center gap-5 text-[11px] font-mono text-slate-500 shrink-0">
             <span>
               <span className="text-slate-400">X:</span> <strong className="text-slate-700">{formatLength(coordXM, calibration.unitSystem)}</strong>
@@ -1142,7 +1626,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
               )}
               {saveStatus === 'saving' && (
                 <span className="flex items-center gap-1 text-blue-600 font-medium animate-pulse">
-                  <Clock size={12} /> Saving…
+                  <Clock size={12} /> Savingâ€¦
                 </span>
               )}
             </div>
@@ -1204,7 +1688,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
         )}
       </div>
 
-      {/* ── DELETE CONFIRMATION MODAL ───────────────────────────────────── */}
+      {/* â”€â”€ DELETE CONFIRMATION MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {pendingDelete && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-2xl p-6 max-w-sm w-full mx-4 border border-slate-200">
@@ -1263,7 +1747,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
         onChange={setCalibration}
       />
 
-      {/* ── KEYBOARD SHORTCUTS HELP MODAL ────────────────────────────────── */}
+      {/* â”€â”€ KEYBOARD SHORTCUTS HELP MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {showShortcutHelp && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-2xl p-6 max-w-lg w-full border border-slate-200">

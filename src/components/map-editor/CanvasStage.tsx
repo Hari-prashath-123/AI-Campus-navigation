@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Rect, Circle, Line, Ellipse, Transformer, Group, Text, Image as KonvaImage } from 'react-konva';
+import { Copy, CopyPlus, Lock, Unlock, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
 import { KonvaEventObject } from 'konva/lib/Node';
 import { EditorShape, EditorTool, Point2D, ObjectType, MapCalibration, LayerVisibility, FloorOverlayConfig } from '../../types';
 import { SpatialNode, CampusConnection, SpatialNodeType } from '../../types/connection';
@@ -20,12 +21,16 @@ export interface CanvasStageProps {
   selectedIds: string[];
   setSelectedIds: (ids: string[]) => void;
   tool: EditorTool;
+  onToolChange?: (tool: EditorTool) => void;
   gridSize: number;
   isSnapping: boolean;
   onCoordinatesChange: (pt: Point2D) => void;
   activeType: ObjectType | null;
   calibration: MapCalibration;
   onDraftMeasure: (m: DraftMeasure) => void;
+  onShapeUpdated?: (shapeId: string, updates: Partial<EditorShape>) => void;
+  /** Called whenever the stage scale or position changes, so parent can sync for element drops */
+  onViewportChange?: (scale: number, position: { x: number; y: number }) => void;
 
   // Graph network props
   nodes?: SpatialNode[];
@@ -66,13 +71,14 @@ const NODE_COLORS: Record<SpatialNodeType, string> = {
 
 export const CanvasStage: React.FC<CanvasStageProps> = ({
   shapes, setShapes, onShapeFinalized, selectedIds, setSelectedIds,
-  tool, gridSize, isSnapping, onCoordinatesChange, activeType, calibration, onDraftMeasure,
+  tool, onToolChange, gridSize, isSnapping, onCoordinatesChange, activeType, calibration, onDraftMeasure, onShapeUpdated,
   nodes = [], connections = [], layers = { floorplanImage: true, nodes: true, edges: true, objects: true, grid: true, validationWarnings: true },
   activeCampusId, activeFloorId, activeBuildingId,
   onNodeCreated, onNodeUpdated, onNodeSelected, onEdgeCreated, onEdgeSelected,
   selectedNodeId, selectedEdgeId, validationIssues = [],
   zoom = 100, onZoomChange, nodeTypeToCreate = 'hallway',
   floorplanImageUrl, overlayConfig, fitToViewTrigger,
+  onViewportChange,
 }) => {
   const stageRef = useRef<any>(null);
   const transformerRef = useRef<any>(null);
@@ -80,6 +86,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   const [scale, setScale] = useState(zoom / 100);
   const [position, setPosition] = useState({ x: 0, y: 0 });
+  const positionRef = useRef({ x: 0, y: 0 });
+  positionRef.current = position;
+  const middlePanRef = useRef({ isPanning: false, startX: 0, startY: 0, origPosX: 0, origPosY: 0 });
   const [isDrawing, setIsDrawing] = useState(false);
   const [newShape, setNewShape] = useState<EditorShape | null>(null);
   const [containerSize, setContainerSize] = useState({ w: 1200, h: 800 });
@@ -104,6 +113,129 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   // Loaded background floorplan image
   const [bgImage, setBgImage] = useState<HTMLImageElement | null>(null);
+
+  // Floating Right-Click Context Menu State
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    shapeId: string;
+  } | null>(null);
+
+  // Close context menu on outside click or scroll
+  useEffect(() => {
+    const handleCloseMenu = () => setContextMenu(null);
+    window.addEventListener('click', handleCloseMenu);
+    window.addEventListener('wheel', handleCloseMenu);
+    return () => {
+      window.removeEventListener('click', handleCloseMenu);
+      window.removeEventListener('wheel', handleCloseMenu);
+    };
+  }, []);
+
+  const handleShapeContextMenu = (shapeId: string, e: KonvaEventObject<MouseEvent>) => {
+    e.evt.preventDefault();
+    e.cancelBubble = true;
+    setSelectedIds([shapeId]);
+    if (onToolChange && tool !== 'select') {
+      onToolChange('select');
+    }
+    setContextMenu({
+      x: e.evt.clientX,
+      y: e.evt.clientY,
+      shapeId,
+    });
+  };
+
+  const handleContextMenuCopy = () => {
+    if (!contextMenu) return;
+    const target = shapes.find(s => s.id === contextMenu.shapeId);
+    if (target) {
+      try {
+        navigator.clipboard.writeText(JSON.stringify(target));
+      } catch {}
+    }
+    setContextMenu(null);
+  };
+
+  const handleContextMenuDuplicate = () => {
+    if (!contextMenu) return;
+    const target = shapes.find(s => s.id === contextMenu.shapeId);
+    if (target) {
+      const wM = pxToMeters(target.width || 60, calibration);
+      const hM = pxToMeters(target.height || 40, calibration);
+      const newX = target.x + gridSize;
+      const newY = target.y + gridSize;
+      const dup: EditorShape = {
+        ...target,
+        id: uuidv4(),
+        name: target.name ? `${target.name} (Copy)` : 'Object (Copy)',
+        x: newX,
+        y: newY,
+        realWorld: {
+          originXMeters: pxToMeters(newX, calibration),
+          originYMeters: pxToMeters(newY, calibration),
+          widthMeters: wM,
+          heightMeters: hM,
+          areaM2: wM * hM,
+          rotationDeg: target.rotation,
+        },
+      };
+      setShapes(prev => [...prev, dup]);
+      setSelectedIds([dup.id]);
+    }
+    setContextMenu(null);
+  };
+
+  const handleContextMenuToggleLock = () => {
+    if (!contextMenu) return;
+    const shapeId = contextMenu.shapeId;
+    const target = shapes.find(s => s.id === shapeId);
+    if (target) {
+      const nextLocked = !target.isLocked;
+      if (onShapeUpdated) {
+        onShapeUpdated(shapeId, { isLocked: nextLocked });
+      } else {
+        setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, isLocked: nextLocked } : s));
+      }
+    }
+    setContextMenu(null);
+  };
+
+  const handleContextMenuBringForward = () => {
+    if (!contextMenu) return;
+    const shapeId = contextMenu.shapeId;
+    setShapes(prev => {
+      const idx = prev.findIndex(s => s.id === shapeId);
+      if (idx === -1 || idx >= prev.length - 1) return prev;
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(idx + 1, 0, item);
+      return next;
+    });
+    setContextMenu(null);
+  };
+
+  const handleContextMenuSendBackward = () => {
+    if (!contextMenu) return;
+    const shapeId = contextMenu.shapeId;
+    setShapes(prev => {
+      const idx = prev.findIndex(s => s.id === shapeId);
+      if (idx <= 0) return prev;
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(idx - 1, 0, item);
+      return next;
+    });
+    setContextMenu(null);
+  };
+
+  const handleContextMenuDelete = () => {
+    if (!contextMenu) return;
+    const shapeId = contextMenu.shapeId;
+    setShapes(prev => prev.filter(s => s.id !== shapeId));
+    setSelectedIds(selectedIds.filter(id => id !== shapeId));
+    setContextMenu(null);
+  };
 
   // Load floorplan reference image
   useEffect(() => {
@@ -165,6 +297,73 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       window.removeEventListener('keyup', handleKeyUp);
     };
   }, [tool, polygonDraftPoints]);
+
+  // Native capture listeners for middle mouse button scroller hold-and-drag pan
+  useEffect(() => {
+    const handleNativeMouseDown = (e: MouseEvent) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        middlePanRef.current = {
+          isPanning: true,
+          startX: e.clientX,
+          startY: e.clientY,
+          origPosX: positionRef.current.x,
+          origPosY: positionRef.current.y,
+        };
+        setIsMiddlePanning(true);
+      }
+    };
+
+    const handleWindowMouseMove = (e: MouseEvent) => {
+      if (middlePanRef.current.isPanning) {
+        e.preventDefault();
+        const dx = e.clientX - middlePanRef.current.startX;
+        const dy = e.clientY - middlePanRef.current.startY;
+        const nextPos = {
+          x: middlePanRef.current.origPosX + dx,
+          y: middlePanRef.current.origPosY + dy,
+        };
+        setPosition(nextPos);
+        positionRef.current = nextPos;
+        if (stageRef.current) {
+          stageRef.current.position(nextPos);
+          stageRef.current.batchDraw();
+        }
+      }
+    };
+
+    const handleWindowMouseUp = (e: MouseEvent) => {
+      if (middlePanRef.current.isPanning && (e.button === 1 || !(e.buttons & 4))) {
+        middlePanRef.current.isPanning = false;
+        setIsMiddlePanning(false);
+      }
+    };
+
+    const handleAuxClick = (e: MouseEvent) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    const el = containerRef.current;
+    if (el) {
+      el.addEventListener('mousedown', handleNativeMouseDown, { capture: true });
+      el.addEventListener('auxclick', handleAuxClick, { capture: true });
+    }
+    window.addEventListener('mousemove', handleWindowMouseMove, { passive: false });
+    window.addEventListener('mouseup', handleWindowMouseUp);
+
+    return () => {
+      if (el) {
+        el.removeEventListener('mousedown', handleNativeMouseDown, { capture: true } as any);
+        el.removeEventListener('auxclick', handleAuxClick, { capture: true } as any);
+      }
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, []);
 
   // Observe container size
   useEffect(() => {
@@ -306,13 +505,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   }, [fitToViewTrigger, fitToView]);
 
-  // Sync transformer to selected shape nodes
+  // Sync transformer to selected shape nodes with double-tick check
   useEffect(() => {
-    if (transformerRef.current && stageRef.current) {
-      const konvaNodes = selectedIds.map(id => stageRef.current.findOne(`#${id}`)).filter(Boolean);
-      transformerRef.current.nodes(konvaNodes);
-      transformerRef.current.getLayer()?.batchDraw();
-    }
+    const updateTransformer = () => {
+      if (transformerRef.current && stageRef.current) {
+        const konvaNodes = selectedIds.map(id => {
+          const s = shapes.find(shape => shape.id === id);
+          if (s?.isLocked) return null;
+          return stageRef.current.findOne('#' + id) || stageRef.current.findOne((n: any) => n.attrs && n.attrs.id === id);
+        }).filter(Boolean);
+        transformerRef.current.nodes(konvaNodes);
+        transformerRef.current.forceUpdate();
+        transformerRef.current.getLayer()?.batchDraw();
+      }
+    };
+    updateTransformer();
+    const t = setTimeout(updateTransformer, 40);
+    return () => clearTimeout(t);
   }, [selectedIds, shapes]);
 
   const getRelativePointerPosition = (): Point2D => {
@@ -346,6 +555,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       y: pointer.y - mousePointTo.y * newScale,
     });
     onZoomChange?.(Math.round(newScale * 100));
+    onViewportChange?.(newScale, { x: pointer.x - mousePointTo.x * newScale, y: pointer.y - mousePointTo.y * newScale });
   };
 
   const handleMouseDown = (e: KonvaEventObject<MouseEvent>) => {
@@ -372,17 +582,67 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     // Tool: Add Node
     if (tool === 'add_node') {
       if (onNodeCreated && activeCampusId) {
+        const nodeId = uuidv4();
+        let targetBuildingId = activeBuildingId;
+        let nodeLabel = `${nodeTypeToCreate.charAt(0).toUpperCase() + nodeTypeToCreate.slice(1)} (${Math.round(sp.x)}, ${Math.round(sp.y)})`;
+
+        // If placing an Entrance (Main or Side), auto-detect nearest building and link to it
+        if (nodeTypeToCreate === 'entrance' || nodeTypeToCreate === 'outdoor_waypoint') {
+          // Find candidates within 220px proximity
+          const candidates = shapes.filter(s => {
+            const sw = s.width || 80;
+            const sh = s.height || 80;
+            return sp.x >= s.x - 220 && sp.x <= s.x + sw + 220 && sp.y >= s.y - 220 && sp.y <= s.y + sh + 220;
+          });
+
+          // Sort candidates: prioritize building elements, then closest distance
+          candidates.sort((a, b) => {
+            const aIsBld = a.attributes?.elementCategory === 'building' || /building|block|hall|admin|lab|corp/i.test(a.name);
+            const bIsBld = b.attributes?.elementCategory === 'building' || /building|block|hall|admin|lab|corp/i.test(b.name);
+            if (aIsBld && !bIsBld) return -1;
+            if (!aIsBld && bIsBld) return 1;
+            const distA = Math.hypot((a.x + (a.width || 80)/2) - sp.x, (a.y + (a.height || 80)/2) - sp.y);
+            const distB = Math.hypot((b.x + (b.width || 80)/2) - sp.x, (b.y + (b.height || 80)/2) - sp.y);
+            return distA - distB;
+          });
+
+          const nearestShape = candidates[0];
+
+          if (nearestShape) {
+            targetBuildingId = nearestShape.objectId || nearestShape.id;
+            nodeLabel = nodeTypeToCreate === 'entrance' 
+              ? `${nearestShape.name} - Main Entrance`
+              : `${nearestShape.name} - Side Entrance`;
+
+            // Auto-bind this entrance door to the building shape
+            if (onShapeUpdated) {
+              const prevEntrances = nearestShape.attributes?.entranceNodeIds || [];
+              onShapeUpdated(nearestShape.id, {
+                attributes: {
+                  ...nearestShape.attributes,
+                  associatedNodeId: nodeId,
+                  entranceNodeIds: Array.from(new Set([...prevEntrances, nodeId])),
+                }
+              });
+            }
+          } else {
+            nodeLabel = nodeTypeToCreate === 'entrance' ? 'Campus Main Entrance Gate' : 'Campus Side Entrance Gate';
+          }
+        }
+
         const newNode: SpatialNode = {
-          id: uuidv4(),
+          id: nodeId,
           campusId: activeCampusId,
-          buildingId: activeBuildingId,
+          buildingId: targetBuildingId,
           floorId: activeFloorId,
           type: nodeTypeToCreate,
           coordinates: { x: sp.x, y: sp.y },
           isAccessible: true,
-          label: `${nodeTypeToCreate.charAt(0).toUpperCase() + nodeTypeToCreate.slice(1)} (${Math.round(sp.x)}, ${Math.round(sp.y)})`,
+          label: nodeLabel,
         };
         onNodeCreated(newNode);
+        onNodeSelected?.(newNode);
+        setSelectedIds([]);
       }
       return;
     }
@@ -409,10 +669,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    // Shape Drawing Tools
-    if (isStage) {
+    // Shape Drawing Tools (allows drawing anywhere across canvas, over elements or empty canvas)
+    const isDrawingTool = tool === 'line' || tool === 'wall' || tool === 'path' || tool === 'rectangle' || tool === 'circle' || tool === 'ellipse' || tool === 'point';
+    if (isDrawingTool) {
       setIsDrawing(true);
-      const geomType = tool === 'line' ? 'polyline' : tool === 'point' ? 'point' : tool === 'circle' ? 'circle' : tool === 'ellipse' ? 'ellipse' : 'polygon';
+      const geomType = (tool === 'line' || tool === 'wall' || tool === 'path') ? 'polyline' : tool === 'point' ? 'point' : tool === 'circle' ? 'circle' : tool === 'ellipse' ? 'ellipse' : 'polygon';
 
       const shape: EditorShape = {
         id: `draft_${uuidv4()}`,
@@ -422,8 +683,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         x: sp.x, y: sp.y,
         width: 0, height: 0,
         rotation: 0, scaleX: 1, scaleY: 1,
-        name: activeType ? `New ${activeType.name}` : 'New Shape',
-        color: activeType?.color || '#3b82f6',
+        name: tool === 'path' ? 'Navigation Path' : tool === 'wall' ? 'Wall Line' : (activeType ? `New ${activeType.name}` : 'New Shape'),
+        color: tool === 'path' ? '#94a3b8' : tool === 'wall' ? '#1e293b' : (activeType?.color || '#3b82f6'),
+        attributes: tool === 'path' ? { isPath: true } : tool === 'wall' ? { isWall: true } : {},
       };
       setNewShape(shape);
       setSelectedIds([]);
@@ -509,7 +771,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           visible: true,
         });
       }
-    } else if (tool === 'line') {
+    } else if (tool === 'line' || tool === 'wall' || tool === 'path') {
       const updated = { ...newShape, points: [newShape.points[0], newShape.points[1], cur.x, cur.y] };
       setNewShape(updated);
       const origin = stageRef.current.getAbsoluteTransform().point({ x: newShape.points[0], y: newShape.points[1] });
@@ -552,7 +814,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       setNewShape(null);
       return;
     }
-    if (tool === 'line') {
+    if (tool === 'line' || tool === 'wall' || tool === 'path') {
       const [x1, y1, x2, y2] = newShape.points;
       if (Math.abs(x2 - x1) < 5 && Math.abs(y2 - y1) < 5) { setNewShape(null); return; }
     }
@@ -563,11 +825,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   };
 
   const handleShapeClick = (shapeId: string, e: KonvaEventObject<MouseEvent>) => {
-    if (tool !== 'select') return;
     e.cancelBubble = true;
+    if (onToolChange && tool !== 'select') {
+      onToolChange('select');
+    }
 
     if (e.evt.shiftKey) {
-      // Toggle selection in multi-select mode
       if (selectedIds.includes(shapeId)) {
         setSelectedIds(selectedIds.filter(id => id !== shapeId));
       } else {
@@ -578,6 +841,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
     onNodeSelected?.(null);
     onEdgeSelected?.(null);
+
+    // Synchronously bind Transformer so resize handles appear INSTANTLY!
+    if (stageRef.current && transformerRef.current) {
+      const s = shapes.find(shape => shape.id === shapeId);
+      if (!s?.isLocked) {
+        const node = stageRef.current.findOne('#' + shapeId) || stageRef.current.findOne((n: any) => n.attrs && n.attrs.id === shapeId);
+        if (node) {
+          transformerRef.current.nodes([node]);
+          transformerRef.current.forceUpdate();
+          transformerRef.current.getLayer()?.batchDraw();
+        }
+      } else {
+        transformerRef.current.nodes([]);
+        transformerRef.current.forceUpdate();
+        transformerRef.current.getLayer()?.batchDraw();
+      }
+    }
   };
 
   const handleNodeClick = (node: SpatialNode, e: KonvaEventObject<MouseEvent>) => {
@@ -640,60 +920,111 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const handleDragEnd = (e: KonvaEventObject<DragEvent>) => {
     const id = e.target.id();
     const node = e.target;
-    const newX = snap(node.x());
-    const newY = snap(node.y());
+    const newX = Math.max(0, snap(node.x()));
+    const newY = Math.max(0, snap(node.y()));
     node.x(newX);
     node.y(newY);
-    setShapes(prev => prev.map(s => {
-      if (s.id !== id) return s;
-      const dx = newX - s.x;
-      const dy = newY - s.y;
-      const updatedPoints = s.points ? s.points.map((p, i) => i % 2 === 0 ? p + dx : p + dy) : s.points;
-      const xM = pxToMeters(newX, calibration);
-      const yM = pxToMeters(newY, calibration);
-      return {
-        ...s,
+
+    const cur = shapes.find(s => s.id === id);
+    const dx = cur ? newX - cur.x : 0;
+    const dy = cur ? newY - cur.y : 0;
+    const updatedPoints: number[] = cur && cur.points ? cur.points.map((p, i) => i % 2 === 0 ? p + dx : p + dy) : (cur?.points || []);
+
+    if (onShapeUpdated) {
+      onShapeUpdated(id, {
         x: newX,
         y: newY,
         points: updatedPoints,
-        realWorld: s.realWorld ? {
-          ...s.realWorld,
-          originXMeters: xM,
-          originYMeters: yM,
-        } : undefined,
-      };
-    }));
+      });
+    } else {
+      setShapes(prev => prev.map(s => {
+        if (s.id !== id) return s;
+        const xM = pxToMeters(newX, calibration);
+        const yM = pxToMeters(newY, calibration);
+        return {
+          ...s,
+          x: newX,
+          y: newY,
+          points: updatedPoints,
+          realWorld: s.realWorld ? {
+            ...s.realWorld,
+            originXMeters: xM,
+            originYMeters: yM,
+          } : undefined,
+        };
+      }));
+    }
   };
 
   const handleTransformEnd = (e: KonvaEventObject<Event>) => {
-    const node = e.target;
-    const id = node.id();
-    // Read the actual visual dimensions from the Konva node before resetting scale
-    const scaleX = node.scaleX();
-    const scaleY = node.scaleY();
-    const newX = snap(node.x());
-    const newY = snap(node.y());
-    const rot = Math.round(node.rotation());
+    let node = e.target as any;
+    if (node.nodes && typeof node.nodes === 'function' && node.nodes().length > 0) {
+      node = node.nodes()[0];
+    } else if (typeof node.getNode === 'function' && !node.id()) {
+      node = node.getNode() || node;
+    }
+    const id = (typeof node.id === 'function' ? node.id() : node.id) || (selectedIds.length === 1 ? selectedIds[0] : '');
+    if (!id) return;
 
-    // Commit scale into width/height and reset scale to 1
+    const scaleX = typeof node.scaleX === 'function' ? node.scaleX() : 1;
+    const scaleY = typeof node.scaleY === 'function' ? node.scaleY() : 1;
+    const absScaleX = Math.abs(scaleX);
+    const absScaleY = Math.abs(scaleY);
+    const newX = Math.max(0, snap(node.x()));
+    const newY = Math.max(0, snap(node.y()));
+    const rot = Math.round(node.rotation ? node.rotation() : 0);
+
+    const currentShape = shapes.find(s => s.id === id);
+    let newW = currentShape?.width || 60;
+    let newH = currentShape?.height || 40;
+
+    // Apply dimensions directly to the Konva node so it does not snap back!
+    if (typeof node.width === 'function' && typeof node.height === 'function') {
+      const curW = node.width();
+      const curH = node.height();
+      newW = Math.max(5, Math.round(curW * absScaleX));
+      newH = Math.max(5, Math.round(curH * absScaleY));
+      node.width(newW);
+      node.height(newH);
+    } else if (typeof node.radius === 'function') {
+      const curR = node.radius();
+      const avgScale = Math.max(absScaleX, absScaleY);
+      const newR = Math.max(4, Math.round(curR * avgScale));
+      node.radius(newR);
+      newW = newR * 2;
+      newH = newR * 2;
+    } else if (typeof node.radiusX === 'function' && typeof node.radiusY === 'function') {
+      const newRx = Math.max(4, Math.round(node.radiusX() * absScaleX));
+      const newRy = Math.max(4, Math.round(node.radiusY() * absScaleY));
+      node.radiusX(newRx);
+      node.radiusY(newRy);
+      newW = newRx * 2;
+      newH = newRy * 2;
+    }
+
+    // Reset scale to 1 on node
     node.scaleX(1);
     node.scaleY(1);
     node.x(newX);
     node.y(newY);
+    node.rotation(rot);
 
-    setShapes(prev => prev.map(s => {
-      if (s.id !== id) return s;
-      const newW = Math.max(5, (s.width || 0) * scaleX);
-      const newH = Math.max(5, (s.height || 0) * scaleY);
-      const wM = pxToMeters(newW, calibration);
-      const hM = pxToMeters(newH, calibration);
-      const xM = pxToMeters(newX, calibration);
-      const yM = pxToMeters(newY, calibration);
-      const updatedPoints = s.points && s.points.length > 4
-        ? s.points.map((p, i) => i % 2 === 0 ? newX + (p - s.x) * scaleX : newY + (p - s.y) * scaleY)
-        : s.points;
-      return {
-        ...s,
+    if (transformerRef.current) {
+      transformerRef.current.forceUpdate();
+      transformerRef.current.getLayer()?.batchDraw();
+    }
+
+    let updatedPoints: number[] = currentShape?.points || [];
+    if (currentShape && currentShape.points && currentShape.points.length > 4) {
+      updatedPoints = currentShape.points.map((p, i) =>
+        i % 2 === 0
+          ? newX + (p - currentShape.x) * scaleX
+          : newY + (p - currentShape.y) * scaleY
+      );
+    }
+
+    if (onShapeUpdated) {
+      onShapeUpdated(id, {
         x: newX,
         y: newY,
         width: newW,
@@ -702,16 +1033,40 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         scaleX: 1,
         scaleY: 1,
         rotation: rot,
-        realWorld: {
-          originXMeters: xM,
-          originYMeters: yM,
-          widthMeters: wM,
-          heightMeters: hM,
-          areaM2: wM * hM,
-          rotationDeg: rot,
-        },
-      };
-    }));
+      });
+    } else {
+      const wM = pxToMeters(newW, calibration);
+      const hM = pxToMeters(newH, calibration);
+      const xM = pxToMeters(newX, calibration);
+      const yM = pxToMeters(newY, calibration);
+      setShapes(prev => prev.map(s => {
+        if (s.id !== id) return s;
+        return {
+          ...s,
+          x: newX,
+          y: newY,
+          width: newW,
+          height: newH,
+          points: updatedPoints,
+          scaleX: 1,
+          scaleY: 1,
+          rotation: rot,
+          realWorld: {
+            originXMeters: xM,
+            originYMeters: yM,
+            widthMeters: wM,
+            heightMeters: hM,
+            areaM2: wM * hM,
+            rotationDeg: rot,
+          },
+        };
+      }));
+    }
+
+    if (transformerRef.current) {
+      transformerRef.current.nodes([node]);
+      transformerRef.current.getLayer()?.batchDraw();
+    }
   };
 
   // Node Map for fast coordinate lookup
@@ -768,7 +1123,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const isPanningActive = tool === 'pan' || isSpacePanning || isMiddlePanning;
 
   return (
-    <div ref={containerRef} className="w-full h-full bg-slate-200 select-none relative overflow-hidden">
+    <div ref={containerRef} onContextMenu={(e) => e.preventDefault()} className="w-full h-full bg-slate-200 select-none relative overflow-hidden">
       <Stage
         ref={stageRef}
         width={containerSize.w}
@@ -800,8 +1155,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         scaleY={scale}
         x={position.x}
         y={position.y}
-        draggable={isPanningActive}
-        style={{ cursor: isPanningActive ? 'grab' : (tool === 'select' ? 'default' : 'crosshair') }}
+        draggable={isPanningActive && !isMiddlePanning}
+        onDragEnd={(e) => {
+          if (e.target === stageRef.current) {
+            const p = { x: e.target.x(), y: e.target.y() };
+            setPosition(p);
+            positionRef.current = p;
+            onViewportChange?.(scale, p);
+          }
+        }}
+        style={{ cursor: (isPanningActive || isMiddlePanning) ? 'grabbing' : (tool === 'select' ? 'default' : 'crosshair') }}
       >
         {/* Layer 0: Grid */}
         {renderGrid()}
@@ -824,6 +1187,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         {/* Layer 1: Objects, Rooms, and Door Link Indicators */}
         {layers.objects && (
           <Layer>
+            {/* Google Maps Path Mode: wash out entire map background and elements */}
+            {tool === 'path' && (
+              <Rect
+                x={-10000}
+                y={-10000}
+                width={30000}
+                height={30000}
+                fill="rgba(255, 255, 255, 0.5)"
+                listening={false}
+              />
+            )}
             {/* Visual linkage lines from rooms to their associated door nodes */}
             {shapes.map(shape => {
               const doorNodeId = shape.attributes?.associatedNodeId;
@@ -836,7 +1210,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               const roomCenterY = shape.y + (shape.height || 20) / 2;
 
               return (
-                <Group key={`doorlink_${shape.id}`}>
+                <Group key={`doorlink_${shape.id}`} listening={false}>
                   <Line
                     points={[roomCenterX, roomCenterY, doorNode.coordinates.x, doorNode.coordinates.y]}
                     stroke={isSelected ? '#2563eb' : '#f59e0b'}
@@ -883,13 +1257,26 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                         points={shape.points.map((p, i) => (i % 2 === 0 ? p - shape.x : p - shape.y))}
                         closed={true}
                         fill={`${shape.color}25`}
+                        opacity={tool === 'path' ? 0.35 : 1}
                         stroke={isDraft ? '#94a3b8' : strokeColor}
                         strokeWidth={strokeW}
                         dash={dashPattern}
-                        draggable={tool === 'select' && isSelected && !isDraft}
+                        draggable={tool === 'select' && !isDraft && !shape.isLocked}
+                        dragBoundFunc={(pos) => ({ x: Math.max(0, pos.x), y: Math.max(0, pos.y) })}
+                        onMouseDown={(e) => {
+                          if (!isDraft) {
+                            handleShapeClick(shape.id, e);
+                          }
+                        }}
+                        onDragStart={(e) => {
+                          if (!isSelected && tool === 'select') {
+                            handleShapeClick(shape.id, e);
+                          }
+                        }}
                         onDragEnd={handleDragEnd}
                         onTransformEnd={handleTransformEnd}
                         onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
                         rotation={shape.rotation}
                       />
                     ) : (
@@ -898,19 +1285,32 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                         x={shape.x} y={shape.y}
                         width={shape.width || 10} height={shape.height || 10}
                         fill={`${shape.color}25`}
+                        opacity={tool === 'path' ? 0.35 : 1}
                         stroke={isDraft ? '#94a3b8' : strokeColor}
                         strokeWidth={strokeW}
                         dash={dashPattern}
-                        draggable={tool === 'select' && isSelected && !isDraft}
+                        draggable={tool === 'select' && !isDraft && !shape.isLocked}
+                        dragBoundFunc={(pos) => ({ x: Math.max(0, pos.x), y: Math.max(0, pos.y) })}
+                        onMouseDown={(e) => {
+                          if (!isDraft) {
+                            handleShapeClick(shape.id, e);
+                          }
+                        }}
+                        onDragStart={(e) => {
+                          if (!isSelected && tool === 'select') {
+                            handleShapeClick(shape.id, e);
+                          }
+                        }}
                         onDragEnd={handleDragEnd}
                         onTransformEnd={handleTransformEnd}
                         onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
                         rotation={shape.rotation}
                         cornerRadius={2}
                       />
                     )}
                     {!isDraft && (
-                      <Group x={shape.x + 4} y={shape.y - 15}>
+                      <Group x={shape.x + 4} y={shape.y - 15} listening={false}>
                         <Rect
                           width={shape.name.length * 6.5 + (objIssue ? 26 : 8)}
                           height={14}
@@ -956,17 +1356,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                         const node = e.target;
                         setShapes(prev => prev.map(s => s.id === shape.id ? { ...s, x: snap(node.x() - rx), y: snap(node.y() - ry) } : s));
                       }}
-                      onTransformEnd={(e) => {
-                        const node = e.target;
-                        setShapes(prev => prev.map(s => {
-                          if (s.id !== shape.id) return s;
-                          const newW = (s.width || 0) * node.scaleX();
-                          const newH = (s.height || 0) * node.scaleY();
-                          node.scaleX(1); node.scaleY(1);
-                          return { ...s, x: snap(node.x() - newW/2), y: snap(node.y() - newH/2), width: newW, height: newH, rotation: node.rotation() };
-                        }));
-                      }}
+                      onTransformEnd={handleTransformEnd}
                       onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
                       rotation={shape.rotation}
                     />
                     {!isDraft && (
@@ -977,19 +1369,168 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               }
 
               if (shape.geometryType === 'polyline') {
+                const isRoad = shape.name.toLowerCase().includes('road') || shape.elementKey?.startsWith('road') || shape.attributes?.isRoad;
+                const isNavPath = shape.attributes?.isPath === true;
+                const isWallLine = shape.attributes?.isWall === true;
                 return (
-                  <Line
-                    key={shape.id}
-                    id={shape.id}
-                    points={shape.points}
-                    stroke={isDraft ? '#94a3b8' : strokeColor}
-                    strokeWidth={strokeW}
-                    dash={isDraft ? [8, 5] : []}
-                    draggable={tool === 'select' && isSelected && !isDraft}
-                    onDragEnd={handleDragEnd}
-                    onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
-                    rotation={shape.rotation}
-                  />
+                  <Group key={shape.id}>
+                    {/* If road: render asphalt road base with curbs and dashed yellow center line */}
+                    {isNavPath ? (
+                      <>
+                        {/* Google Maps style grey navigation path */}
+                        <Line
+                          id={shape.id}
+                          points={shape.points}
+                          stroke="rgba(148,163,184,0.85)"
+                          strokeWidth={8}
+                          lineCap="round"
+                          lineJoin="round"
+                          tension={0.3}
+                          opacity={0.75}
+                          draggable={tool === 'select' && !isDraft}
+                          onMouseDown={(e) => {
+                            if (tool === 'select' && !isDraft) handleShapeClick(shape.id, e);
+                          }}
+                          onDragStart={(e) => {
+                            if (!isSelected && tool === 'select') handleShapeClick(shape.id, e);
+                          }}
+                          onDragEnd={handleDragEnd}
+                          onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                          onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
+                        />
+                        {/* Path center line (lighter) */}
+                        <Line
+                          points={shape.points}
+                          stroke="rgba(203,213,225,0.6)"
+                          strokeWidth={3}
+                          lineCap="round"
+                          lineJoin="round"
+                          tension={0.3}
+                          listening={false}
+                        />
+                      </>
+                    ) : isWallLine ? (
+                      <Line
+                        id={shape.id}
+                        points={shape.points}
+                        stroke="#1e293b"
+                        strokeWidth={5}
+                        lineCap="square"
+                        lineJoin="miter"
+                        tension={0}
+                        draggable={tool === 'select' && !isDraft}
+                        onMouseDown={(e) => {
+                          if (tool === 'select' && !isDraft) handleShapeClick(shape.id, e);
+                        }}
+                        onDragStart={(e) => {
+                          if (!isSelected && tool === 'select') handleShapeClick(shape.id, e);
+                        }}
+                        onDragEnd={handleDragEnd}
+                        onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
+                      />
+                    ) : isRoad ? (
+                      <>
+                        {/* Outer Curbs */}
+                        <Line
+                          points={shape.points}
+                          stroke="#9ca3af"
+                          opacity={tool === 'path' ? 0.35 : 1}
+                          strokeWidth={28}
+                          lineCap="round"
+                          lineJoin="round"
+                          tension={0.3}
+                        />
+                        {/* Asphalt Body */}
+                        <Line
+                          id={shape.id}
+                          points={shape.points}
+                          stroke="#374151"
+                          opacity={tool === 'path' ? 0.35 : 1}
+                          strokeWidth={24}
+                          lineCap="round"
+                          lineJoin="round"
+                          tension={0.3}
+                          draggable={tool === 'select' && !isDraft}
+                          onMouseDown={(e) => {
+                            if (tool === 'select' && !isDraft) handleShapeClick(shape.id, e);
+                          }}
+                          onDragStart={(e) => {
+                            if (!isSelected && tool === 'select') handleShapeClick(shape.id, e);
+                          }}
+                          onDragEnd={handleDragEnd}
+                          onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
+                        />
+                        {/* Yellow Dashed Center Line */}
+                        <Line
+                          points={shape.points}
+                          stroke="#facc15"
+                          strokeWidth={2.5}
+                          dash={[10, 8]}
+                          lineCap="round"
+                          lineJoin="round"
+                          tension={0.3}
+                          listening={false}
+                        />
+                      </>
+                    ) : (
+                      <Line
+                        key={shape.id}
+                        id={shape.id}
+                        points={shape.points}
+                        stroke={isDraft ? '#94a3b8' : strokeColor}
+                        strokeWidth={strokeW}
+                        dash={isDraft ? [8, 5] : []}
+                        draggable={tool === 'select' && !isDraft}
+                        onMouseDown={(e) => {
+                          if (tool === 'select' && !isDraft) handleShapeClick(shape.id, e);
+                        }}
+                        onDragStart={(e) => {
+                          if (!isSelected && tool === 'select') handleShapeClick(shape.id, e);
+                        }}
+                        onDragEnd={handleDragEnd}
+                        onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
+                        rotation={shape.rotation}
+                      />
+                    )}
+
+                    {/* Interactive Vertex Bend Handles when Selected */}
+                    {isSelected && !isDraft && shape.points && shape.points.length >= 4 && (
+                      <Group>
+                        {/* Vertex Drag Handles (bend the road) */}
+                        {shape.points.map((val, idx) => {
+                          if (idx % 2 !== 0) return null;
+                          const ptX = val;
+                          const ptY = shape.points[idx + 1];
+                          const ptIndex = idx;
+                          return (
+                            <Circle
+                              key={`handle_${shape.id}_${idx}`}
+                              x={ptX}
+                              y={ptY}
+                              radius={6}
+                              fill="#2563eb"
+                              stroke="#ffffff"
+                              strokeWidth={2}
+                              draggable
+                              onDragMove={(e) => {
+                                const newX = snap(e.target.x());
+                                const newY = snap(e.target.y());
+                                const nextPts = [...shape.points];
+                                nextPts[ptIndex] = newX;
+                                nextPts[ptIndex + 1] = newY;
+                                if (onShapeUpdated) {
+                                  onShapeUpdated(shape.id, { points: nextPts });
+                                }
+                              }}
+                            />
+                          );
+                        })}
+                      </Group>
+                    )}
+                  </Group>
                 );
               }
 
@@ -999,13 +1540,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     <Circle
                       id={shape.id}
                       x={shape.x} y={shape.y}
-                      radius={8}
+                      radius={shape.width ? shape.width / 2 : 8}
                       fill={shape.color}
                       stroke={isSelected ? '#2563eb' : 'white'}
                       strokeWidth={2}
                       draggable={tool === 'select' && isSelected && !isDraft}
                       onDragEnd={handleDragEnd}
+                      onTransformEnd={handleTransformEnd}
                       onClick={(e) => !isDraft && handleShapeClick(shape.id, e)}
+                        onContextMenu={(e) => !isDraft && handleShapeContextMenu(shape.id, e)}
                     />
                     {!isDraft && (
                       <Text x={shape.x + 12} y={shape.y - 5} text={shape.name} fontSize={10} fill={shape.color} fontStyle="bold" />
@@ -1013,6 +1556,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   </Group>
                 );
               }
+              // ── Image / Preset Element shape ──────────────────────────────
+              if (shape.geometryType === 'image' && shape.elementDataUrl) {
+                return (
+                  <ImageShape
+                    key={shape.id}
+                    shape={shape}
+                    isSelected={isSelected}
+                    tool={tool}
+                                        onDragEnd={handleDragEnd}
+                    onTransformEnd={handleTransformEnd}
+                    onShapeClick={handleShapeClick}
+                    onContextMenu={handleShapeContextMenu}
+                  />
+                );
+              }
+
               return null;
             })}
 
@@ -1047,8 +1606,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
             <Transformer
               ref={transformerRef}
-              enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
-              boundBoxFunc={(oldBox, newBox) => (newBox.width < 5 || newBox.height < 5 ? oldBox : newBox)}
+              enabledAnchors={[
+                'top-left', 'top-center', 'top-right',
+                'middle-right', 'middle-left',
+                'bottom-left', 'bottom-center', 'bottom-right'
+              ]}
+              rotateEnabled={true}
+              rotateAnchorOffset={24}
+              rotationSnaps={[0, 45, 90, 135, 180, 225, 270, 315]}
+              anchorSize={8}
+              anchorCornerRadius={2}
+              borderStroke="#2563eb"
+              borderStrokeWidth={1.5}
+              borderDash={[4, 4]}
+              anchorStroke="#2563eb"
+              anchorFill="#ffffff"
+              boundBoxFunc={(oldBox, newBox) => (Math.abs(newBox.width) < 5 || Math.abs(newBox.height) < 5 ? oldBox : newBox)}
+              onTransformEnd={handleTransformEnd}
             />
           </Layer>
         )}
@@ -1141,7 +1715,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   key={node.id}
                   x={node.coordinates.x}
                   y={node.coordinates.y}
-                  draggable={tool === 'select'}
+                  draggable={true}
                   onDragEnd={(e) => handleNodeDragEnd(node.id, e)}
                   onClick={(e) => handleNodeClick(node, e)}
                 >
@@ -1174,8 +1748,36 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     />
                   )}
 
-                  {/* Main Node Circle / Square for door */}
-                  {isDoorNode ? (
+                  {/* Main Node Rendering: Location Pin Symbol for Entrances */}
+                  {node.type === 'entrance' || node.type === 'outdoor_waypoint' ? (
+                    <Group y={-6}>
+                      {/* Teardrop Location Pin Marker */}
+                      <Circle
+                        y={-6}
+                        radius={10}
+                        fill={node.type === 'entrance' ? '#ef4444' : '#f97316'}
+                        stroke="#ffffff"
+                        strokeWidth={2.5}
+                        shadowColor="black"
+                        shadowBlur={5}
+                        shadowOpacity={0.35}
+                      />
+                      {/* Downward Pointer Pin Tip */}
+                      <Line
+                        points={[-5, -2, 0, 6, 5, -2]}
+                        closed={true}
+                        fill={node.type === 'entrance' ? '#ef4444' : '#f97316'}
+                        stroke="#ffffff"
+                        strokeWidth={1.5}
+                      />
+                      {/* Inner Pin Dot */}
+                      <Circle
+                        y={-6}
+                        radius={3.5}
+                        fill="#ffffff"
+                      />
+                    </Group>
+                  ) : isDoorNode ? (
                     <Rect
                       x={-radius}
                       y={-radius}
@@ -1267,6 +1869,250 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           Fit
         </button>
       </div>
+      {/* Floating Right-Click Context Menu */}
+      {contextMenu && (
+        <div
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          className="fixed z-50 bg-white border border-slate-200 rounded-xl shadow-2xl py-1.5 min-w-[190px] text-xs font-medium text-slate-700 animate-in fade-in zoom-in-95 duration-100 select-none"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Copy */}
+          <button
+            onClick={handleContextMenuCopy}
+            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-slate-100 hover:text-slate-900 transition-colors text-left"
+          >
+            <Copy size={14} className="text-slate-500" />
+            <span>Copy</span>
+          </button>
+
+          {/* Duplicate */}
+          <button
+            onClick={handleContextMenuDuplicate}
+            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-slate-100 hover:text-slate-900 transition-colors text-left"
+          >
+            <CopyPlus size={14} className="text-blue-500" />
+            <span>Duplicate</span>
+          </button>
+
+          <div className="h-px bg-slate-100 my-1" />
+
+          {/* Lock / Unlock */}
+          <button
+            onClick={handleContextMenuToggleLock}
+            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-slate-100 hover:text-slate-900 transition-colors text-left"
+          >
+            {shapes.find(s => s.id === contextMenu.shapeId)?.isLocked ? (
+              <>
+                <Unlock size={14} className="text-amber-500" />
+                <span>Unlock Element</span>
+              </>
+            ) : (
+              <>
+                <Lock size={14} className="text-slate-500" />
+                <span>Lock Element</span>
+              </>
+            )}
+          </button>
+
+          <div className="h-px bg-slate-100 my-1" />
+
+          {/* Bring Forward */}
+          <button
+            onClick={handleContextMenuBringForward}
+            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-slate-100 hover:text-slate-900 transition-colors text-left"
+          >
+            <ArrowUp size={14} className="text-slate-500" />
+            <span>Bring Forward</span>
+          </button>
+
+          {/* Send Backward */}
+          <button
+            onClick={handleContextMenuSendBackward}
+            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-slate-100 hover:text-slate-900 transition-colors text-left"
+          >
+            <ArrowDown size={14} className="text-slate-500" />
+            <span>Send Backward</span>
+          </button>
+
+          <div className="h-px bg-slate-100 my-1" />
+
+          {/* Delete */}
+          <button
+            onClick={handleContextMenuDelete}
+            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-red-50 text-red-600 transition-colors text-left"
+          >
+            <Trash2 size={14} />
+            <span>Delete</span>
+          </button>
+        </div>
+      )}
     </div>
+  );
+};
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * ImageShape - renders a preset element SVG image on the canvas
+ * Uses synchronous in-memory cached HTMLImageElements so KonvaImage is immediately
+ * mounted and Transformer handles attach without any delay.
+ * ────────────────────────────────────────────────────────────────────────── */
+const IMAGE_DOM_CACHE = new Map<string, HTMLImageElement>();
+
+function getOrCreateImage(url?: string): HTMLImageElement | null {
+  if (!url) return null;
+  if (IMAGE_DOM_CACHE.has(url)) {
+    return IMAGE_DOM_CACHE.get(url)!;
+  }
+  const img = new window.Image();
+  img.src = url;
+  IMAGE_DOM_CACHE.set(url, img);
+  return img;
+}
+
+interface ImageShapeProps {
+  shape: EditorShape;
+  isSelected: boolean;
+  tool: EditorTool;
+  onToolChange?: (tool: EditorTool) => void;
+  onDragEnd: (e: KonvaEventObject<DragEvent>) => void;
+  onTransformEnd: (e: KonvaEventObject<Event>) => void;
+  onShapeClick: (id: string, e: KonvaEventObject<MouseEvent>) => void;
+  onContextMenu: (id: string, e: KonvaEventObject<MouseEvent>) => void;
+}
+
+const ImageShape: React.FC<ImageShapeProps> = ({
+  shape, isSelected, tool, onDragEnd, onTransformEnd, onShapeClick, onContextMenu,
+}) => {
+  const [imgEl, setImgEl] = React.useState<HTMLImageElement | null>(() => getOrCreateImage(shape.elementDataUrl));
+
+  React.useEffect(() => {
+    if (!shape.elementDataUrl) return;
+    const img = getOrCreateImage(shape.elementDataUrl);
+    if (img) {
+      if (img.complete && img.naturalWidth > 0) {
+        setImgEl(img);
+      } else {
+        img.onload = () => setImgEl(img);
+      }
+    }
+  }, [shape.elementDataUrl]);
+
+  if (!imgEl) return null;
+
+  const w = shape.width || 120;
+  const h = shape.height || 100;
+  const rot = shape.rotation || 0;
+  const isLocked = Boolean(shape.isLocked);
+
+  return (
+    <Group key={shape.id}>
+      <KonvaImage
+        id={shape.id}
+        name="canvas-shape"
+        image={imgEl}
+        x={shape.x}
+        y={shape.y}
+        width={w}
+        height={h}
+        rotation={rot}
+        draggable={tool === 'select' && !isLocked}
+        dragBoundFunc={(pos) => ({ x: Math.max(0, pos.x), y: Math.max(0, pos.y) })}
+        listening={tool === 'select'}
+        onMouseDown={(e) => {
+          if (tool === 'select') onShapeClick(shape.id, e);
+        }}
+        onDragStart={(e) => {
+          if (tool === 'select' && !isSelected) {
+            onShapeClick(shape.id, e as any);
+          }
+        }}
+        onDragEnd={onDragEnd}
+        onTransformEnd={onTransformEnd}
+        onClick={(e) => {
+          if (tool === 'select') onShapeClick(shape.id, e);
+        }}
+        onContextMenu={(e) => onContextMenu(shape.id, e)}
+        opacity={tool === 'path' ? 0.35 : 1}
+        shadowColor={isSelected ? '#2563eb' : 'transparent'}
+        shadowBlur={isSelected ? 8 : 0}
+        shadowOpacity={0.4}
+      />
+
+      {/* ── THE 5 DOT LINES (Dashed Selection Box + 5+ Resize/Rotation Dots) ── */}
+      {isSelected && !isLocked && (
+        <Group x={shape.x} y={shape.y} rotation={rot} listening={false}>
+          {/* Dashed outer box: 5 dot line pattern */}
+          <Rect
+            x={0}
+            y={0}
+            width={w}
+            height={h}
+            stroke="#2563eb"
+            strokeWidth={2}
+            dash={[5, 4]}
+            fill="transparent"
+          />
+          {/* Top Rotation Stalk line */}
+          <Line
+            points={[w / 2, 0, w / 2, -22]}
+            stroke="#2563eb"
+            strokeWidth={1.5}
+          />
+          {/* Dot 1: Top Rotation Handle Dot */}
+          <Circle
+            x={w / 2}
+            y={-22}
+            radius={5.5}
+            fill="#ffffff"
+            stroke="#2563eb"
+            strokeWidth={2}
+          />
+          {/* Dot 2: Top-Left Corner Dot */}
+          <Circle x={0} y={0} radius={5} fill="#ffffff" stroke="#2563eb" strokeWidth={2} />
+          {/* Dot 3: Top-Right Corner Dot */}
+          <Circle x={w} y={0} radius={5} fill="#ffffff" stroke="#2563eb" strokeWidth={2} />
+          {/* Dot 4: Bottom-Right Corner Dot */}
+          <Circle x={w} y={h} radius={5} fill="#ffffff" stroke="#2563eb" strokeWidth={2} />
+          {/* Dot 5: Bottom-Left Corner Dot */}
+          <Circle x={0} y={h} radius={5} fill="#ffffff" stroke="#2563eb" strokeWidth={2} />
+
+          {/* Edge Midpoint Dots for cropping width & height */}
+          <Circle x={w / 2} y={0} radius={4} fill="#ffffff" stroke="#2563eb" strokeWidth={1.5} />
+          <Circle x={w / 2} y={h} radius={4} fill="#ffffff" stroke="#2563eb" strokeWidth={1.5} />
+          <Circle x={0} y={h / 2} radius={4} fill="#ffffff" stroke="#2563eb" strokeWidth={1.5} />
+          <Circle x={w} y={h / 2} radius={4} fill="#ffffff" stroke="#2563eb" strokeWidth={1.5} />
+        </Group>
+      )}
+
+      {/* Locked status outline & badge */}
+      {isSelected && isLocked && (
+        <Group x={shape.x} y={shape.y} rotation={rot} listening={false}>
+          <Rect
+            x={0}
+            y={0}
+            width={w}
+            height={h}
+            stroke="#f59e0b"
+            strokeWidth={2}
+            dash={[4, 2]}
+            fill="transparent"
+          />
+          <Group x={w / 2 - 28} y={-18}>
+            <Rect width={56} height={16} rx={3} fill="#f59e0b" />
+            <Text x={6} y={3} text="🔒 Locked" fontSize={9} fill="#ffffff" fontStyle="bold" />
+          </Group>
+        </Group>
+      )}
+
+      {/* Label (non-blocking for clicks) */}
+      <Group x={shape.x + 4} y={shape.y - 15} listening={false}>
+        <Rect
+          width={shape.name.length * 6.5 + (isLocked ? 20 : 8)}
+          height={14}
+          fill="rgba(255,255,255,0.92)"
+          cornerRadius={3}
+        />
+        <Text x={4} y={2} text={isLocked ? `🔒 ${shape.name}` : shape.name} fontSize={10} fill={isLocked ? "#d97706" : "#6366f1"} fontStyle="bold" />
+      </Group>
+    </Group>
   );
 };

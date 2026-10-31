@@ -8,12 +8,15 @@ export type EditorTool =
   | 'rectangle' 
   | 'polygon' 
   | 'line' 
+  | 'wall'
+  | 'path'
   | 'point' 
   | 'circle'
   | 'ellipse'
   | 'add_node' 
   | 'add_edge' 
-  | 'connect_floors';
+  | 'connect_floors'
+  | 'element';
 
 export interface EditorViewport {
   zoom: number;
@@ -36,7 +39,7 @@ export interface EditorShape {
   id: string;
   objectId?: string;
   objectTypeId: string;
-  geometryType: GeometryRepresentation;
+  geometryType: GeometryRepresentation | 'image';
   /** Canvas pixel position / size — ephemeral, derived from realWorld + calibration */
   points: number[];
   x: number;
@@ -48,9 +51,15 @@ export interface EditorShape {
   scaleY: number;
   name: string;
   color: string;
+  /** Whether the shape is locked from accidental moving/resizing */
+  isLocked?: boolean;
   attributes?: Record<string, any>;
   /** Authoritative real-world geometry in meters — persisted to DB */
   realWorld?: RealWorldGeometry;
+  /** For image/element shapes: key from MAP_ELEMENTS catalog */
+  elementKey?: string;
+  /** For image/element shapes: data URL of the SVG image */
+  elementDataUrl?: string;
 }
 
 export interface MapEditorState {

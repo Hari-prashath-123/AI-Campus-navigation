@@ -9,7 +9,19 @@ import { LoadingState } from '../components/ui/LoadingState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Modal } from '../components/ui/Modal';
-import { Layers, Plus, Edit2, Map, Copy, Box } from 'lucide-react';
+import { Layers, Plus, Edit2, Map, Copy, DoorOpen, Search, Trash2 } from 'lucide-react';
+import { objectService } from '../api/object.service';
+import { MapObject } from '../types';
+
+const isRealRoom = (o: MapObject) => {
+  const cat = (o.category || '').toLowerCase();
+  const typeId = (o.objectTypeId || '').toLowerCase();
+  const name = (typeof o.name === 'string' ? o.name : o.name?.en || '').toLowerCase();
+  if (['transit', 'navigation_path', 'outdoor', 'path'].includes(cat)) return false;
+  if (['navigation_path', 'navpath', 'hallway', 'corridor', 'pathway', 'walkway'].some(t => typeId.includes(t))) return false;
+  if (['navigation_path', 'navpath', 'hallway', 'corridor', 'pathway', 'walkway', 'straight road', 'curved 90'].some(t => name.startsWith(t) || name.includes(t))) return false;
+  return true;
+};
 
 export const BuildingDetail: React.FC = () => {
   const { campusId, buildingId } = useParams<{ campusId: string; buildingId: string }>();
@@ -35,6 +47,16 @@ export const BuildingDetail: React.FC = () => {
   const [duplicateName, setDuplicateName] = useState('');
   const [duplicateLevel, setDuplicateLevel] = useState(0);
 
+  // Floor Rooms management state
+  const [floorRooms, setFloorRooms] = useState<Record<string, MapObject[]>>({});
+  const [selectedFloorForRooms, setSelectedFloorForRooms] = useState<Floor | null>(null);
+  const [isRoomsModalOpen, setIsRoomsModalOpen] = useState(false);
+  const [roomFilterSearch, setRoomFilterSearch] = useState('');
+  const [newRoomName, setNewRoomName] = useState('');
+  const [newRoomCode, setNewRoomCode] = useState('');
+  const [newRoomCategory, setNewRoomCategory] = useState('office');
+  const [creatingRoom, setCreatingRoom] = useState(false);
+
   useEffect(() => {
     if (campusId && buildingId) {
       loadData(campusId, buildingId);
@@ -56,7 +78,18 @@ export const BuildingDetail: React.FC = () => {
       if (buildingRes.success && buildingRes.data) setBuilding(buildingRes.data);
       else setError('Building not found.');
 
-      if (floorsRes.success) setFloors(floorsRes.data);
+      if (floorsRes.success) {
+        setFloors(floorsRes.data);
+        // Load objects for each floor
+        const roomsMap: Record<string, MapObject[]> = {};
+        await Promise.all(
+          floorsRes.data.map(async f => {
+            const oRes = await objectService.getObjectsByFloor(f.id);
+            if (oRes.success) roomsMap[f.id] = oRes.data.filter(isRealRoom);
+          })
+        );
+        setFloorRooms(roomsMap);
+      }
     } catch (err: any) {
       setError(err.message || 'An error occurred.');
     } finally {
@@ -86,6 +119,57 @@ export const BuildingDetail: React.FC = () => {
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleOpenRoomsModal = async (flr: Floor) => {
+    setSelectedFloorForRooms(flr);
+    setRoomFilterSearch('');
+    setIsRoomsModalOpen(true);
+    const oRes = await objectService.getObjectsByFloor(flr.id);
+    if (oRes.success) {
+      setFloorRooms(prev => ({ ...prev, [flr.id]: oRes.data.filter(isRealRoom) }));
+    }
+  };
+
+  const handleCreateRoomForFloor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedFloorForRooms || !newRoomName.trim() || !campus || !building) return;
+    setCreatingRoom(true);
+    try {
+      const code = newRoomCode.trim() || newRoomName.trim().toUpperCase().replace(/\s+/g, '-').slice(0, 10);
+      const res = await objectService.createObject({
+        campusId: campus.id,
+        buildingId: building.id,
+        floorId: selectedFloorForRooms.id,
+        code,
+        name: { en: newRoomName.trim() },
+        category: newRoomCategory,
+        coordinates: { x: 0, y: 0 },
+        associatedNodeId: '',
+        isAccessible: true,
+      });
+      if (res.success && res.data) {
+        setFloorRooms(prev => ({
+          ...prev,
+          [selectedFloorForRooms.id]: [...(prev[selectedFloorForRooms.id] || []), res.data]
+        }));
+        setNewRoomName('');
+        setNewRoomCode('');
+      }
+    } finally {
+      setCreatingRoom(false);
+    }
+  };
+
+  const handleDeleteRoom = async (roomId: string) => {
+    if (!selectedFloorForRooms) return;
+    const res = await objectService.deleteObject(roomId);
+    if (res.success) {
+      setFloorRooms(prev => ({
+        ...prev,
+        [selectedFloorForRooms.id]: (prev[selectedFloorForRooms.id] || []).filter(r => r.id !== roomId)
+      }));
     }
   };
 
@@ -198,13 +282,25 @@ export const BuildingDetail: React.FC = () => {
                       </div>
                     </Link>
                     <div className="flex items-center gap-2 shrink-0">
-                      <Link to={`/admin/campuses/${campus.id}/buildings/${building.id}/floors/${floor.id}/objects`}>
-                        <Button variant="outline" size="sm" icon={<Box size={14} />} className="opacity-0 group-hover:opacity-100 transition-opacity">Objects</Button>
-                      </Link>
+                      {/* Visible Rooms Button next to Map Editor */}
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        icon={<DoorOpen size={14} className="text-blue-600" />}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          handleOpenRoomsModal(floor);
+                        }}
+                        className="border-blue-200 text-blue-700 bg-blue-50/50 hover:bg-blue-100/70 font-semibold shadow-xs"
+                      >
+                        Rooms ({floorRooms[floor.id]?.length || 0})
+                      </Button>
+
                       <Button 
                         variant="ghost" 
                         size="sm"
                         className="text-slate-500 hover:text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Duplicate floor"
                         onClick={(e) => {
                           e.preventDefault();
                           setDuplicateConfirm(floor);
@@ -214,6 +310,7 @@ export const BuildingDetail: React.FC = () => {
                       >
                         <Copy size={16} />
                       </Button>
+                      
                       <Link to={`/admin/campuses/${campus.id}/buildings/${building.id}/floors/${floor.id}`}>
                         <Button variant="outline" size="sm" icon={<Map size={14} />}>Map Editor</Button>
                       </Link>
@@ -293,6 +390,158 @@ export const BuildingDetail: React.FC = () => {
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={() => setDuplicateConfirm(null)}>Cancel</Button>
             <Button variant="primary" onClick={handleDuplicateFloor} isLoading={saving} disabled={!duplicateName.trim()}>Duplicate Floor</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Rooms Management Modal with Add Room & Room Interior Map Editor buttons */}
+      <Modal
+        isOpen={isRoomsModalOpen}
+        onClose={() => setIsRoomsModalOpen(false)}
+        title={`Rooms on Level ${selectedFloorForRooms?.level ?? 0} — ${selectedFloorForRooms?.name.en || 'Floor'}`}
+        size="lg"
+      >
+        <div className="space-y-5">
+          {/* Header Description */}
+          <div className="p-3 bg-blue-50/80 border border-blue-200 rounded-lg text-xs text-blue-900 leading-relaxed">
+            Declare rooms for this floor. Added rooms appear in the <strong>Unplaced</strong> section of the Floor Map Editor, and you can click <strong>Map Editor</strong> on any room to customize its interior cabins, staff desks, and walkways.
+          </div>
+
+          {/* Declare New Room Form */}
+          <form onSubmit={handleCreateRoomForFloor} className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+              <Plus size={14} className="text-blue-600" />
+              <span>Declare New Room on Floor</span>
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="sm:col-span-1">
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Room Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Staff Room, HOD Cabin"
+                  value={newRoomName}
+                  onChange={e => setNewRoomName(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Room Code</label>
+                <input
+                  type="text"
+                  placeholder="e.g. SR-01"
+                  value={newRoomCode}
+                  onChange={e => setNewRoomCode(e.target.value.toUpperCase())}
+                  className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Category</label>
+                <select
+                  value={newRoomCategory}
+                  onChange={e => setNewRoomCategory(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none focus:border-blue-500"
+                >
+                  <option value="office">Staff Room / Office</option>
+                  <option value="classroom">Classroom</option>
+                  <option value="laboratory">Laboratory</option>
+                  <option value="amenity">Restroom / Amenity</option>
+                  <option value="cafeteria">Cafeteria / Canteen</option>
+                  <option value="auditorium">Auditorium</option>
+                  <option value="conference">Conference Room</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                variant="primary"
+                size="sm"
+                disabled={creatingRoom || !newRoomName.trim()}
+                icon={<Plus size={14} />}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold"
+              >
+                {creatingRoom ? 'Adding Room...' : '+ Add Room to Floor'}
+              </Button>
+            </div>
+          </form>
+
+          {/* Rooms List */}
+          <div>
+            <div className="flex items-center justify-between mb-2.5">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                Floor Rooms ({(selectedFloorForRooms && floorRooms[selectedFloorForRooms.id]?.length) || 0})
+              </h4>
+              <div className="relative w-48">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" size={12} />
+                <input
+                  type="text"
+                  placeholder="Filter rooms..."
+                  value={roomFilterSearch}
+                  onChange={e => setRoomFilterSearch(e.target.value)}
+                  className="w-full pl-7 pr-2.5 py-1 text-xs bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            {selectedFloorForRooms && (floorRooms[selectedFloorForRooms.id]?.length || 0) === 0 ? (
+              <div className="text-center p-8 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-xs text-slate-400">
+                No rooms declared on this floor yet. Use the form above to declare your first room.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                {selectedFloorForRooms && (floorRooms[selectedFloorForRooms.id] || [])
+                  .filter(r => {
+                    if (!isRealRoom(r)) return false;
+                    const name = typeof r.name === 'string' ? r.name : r.name.en;
+                    return name.toLowerCase().includes(roomFilterSearch.toLowerCase()) || r.code.toLowerCase().includes(roomFilterSearch.toLowerCase());
+                  })
+                  .map(room => {
+                    const rName = typeof room.name === 'string' ? room.name : room.name.en;
+                    return (
+                      <div key={room.id} className="p-3 bg-white border border-slate-200 rounded-lg hover:border-blue-300 shadow-2xs flex items-center justify-between gap-3 transition-colors">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                            <DoorOpen size={16} />
+                          </div>
+                          <div className="min-w-0">
+                            <h5 className="font-semibold text-slate-900 text-xs truncate">{rName}</h5>
+                            <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-0.5">
+                              <span>Code: {room.code}</span>
+                              <span>•</span>
+                              <span className="capitalize px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-medium">{room.category}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {/* Dedicated Map Editor button for this Room's Interior */}
+                          <Link to={`/admin/campuses/${campus?.id}/buildings/${building?.id}/floors/${selectedFloorForRooms.id}?roomId=${room.id}`}>
+                            <Button 
+                              variant="primary" 
+                              size="sm" 
+                              icon={<Map size={13} />}
+                              className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs"
+                            >
+                              Map Editor
+                            </Button>
+                          </Link>
+
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-slate-400 hover:text-red-600"
+                            onClick={() => handleDeleteRoom(room.id)}
+                            title="Delete Room"
+                          >
+                            <Trash2 size={14} />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
           </div>
         </div>
       </Modal>

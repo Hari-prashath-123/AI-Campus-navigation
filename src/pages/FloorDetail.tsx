@@ -89,7 +89,11 @@ export const FloorDetail: React.FC = () => {
           MapEditor receives the active campus/building/floor context so it knows
           which objects to load and where to persist changes.
         */}
-        <MapEditor />
+        <MapEditor
+          campusId={campusId}
+          buildingId={buildingId}
+          floorId={floorId}
+        />
       </div>
     </div>
   );

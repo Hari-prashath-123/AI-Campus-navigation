@@ -302,6 +302,9 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       const ok = window.confirm('You have unsaved changes on this floor. Discard and switch campus?');
       if (!ok) return;
     }
+    // Clear shapes immediately so no stale data bleeds into the new campus
+    setShapes([]);
+    prevShapesHash.current = '';
     setActiveCampusId(newCampusId);
     setActiveBuildingId('');
     setActiveFloorId('');
@@ -312,6 +315,9 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       const ok = window.confirm('You have unsaved changes on this floor. Discard and switch building?');
       if (!ok) return;
     }
+    // Clear shapes immediately so no stale data bleeds into the new building
+    setShapes([]);
+    prevShapesHash.current = '';
     setActiveBuildingId(newBuildingId);
     setActiveFloorId('');
   };
@@ -321,6 +327,9 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       const ok = window.confirm('You have unsaved changes on this floor. Discard and switch floor?');
       if (!ok) return;
     }
+    // Clear shapes immediately so no stale data bleeds into the new floor
+    setShapes([]);
+    prevShapesHash.current = '';
     setActiveFloorId(newFloorId);
   };
 

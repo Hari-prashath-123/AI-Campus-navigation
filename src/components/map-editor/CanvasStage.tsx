@@ -87,6 +87,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // Spacebar temporary hand-pan state
   const [isSpacePanning, setIsSpacePanning] = useState(false);
 
+  // Middle-mouse button pan state
+  const [isMiddlePanning, setIsMiddlePanning] = useState(false);
+
   // Marquee drag selection box
   const [isMarqueeSelecting, setIsMarqueeSelecting] = useState(false);
   const [marqueeStart, setMarqueeStart] = useState<Point2D>({ x: 0, y: 0 });
@@ -665,17 +668,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const handleTransformEnd = (e: KonvaEventObject<Event>) => {
     const node = e.target;
     const id = node.id();
+    // Read the actual visual dimensions from the Konva node before resetting scale
+    const scaleX = node.scaleX();
+    const scaleY = node.scaleY();
+    const newX = snap(node.x());
+    const newY = snap(node.y());
+    const rot = Math.round(node.rotation());
+
+    // Commit scale into width/height and reset scale to 1
+    node.scaleX(1);
+    node.scaleY(1);
+    node.x(newX);
+    node.y(newY);
+
     setShapes(prev => prev.map(s => {
       if (s.id !== id) return s;
-      const scaleX = node.scaleX();
-      const scaleY = node.scaleY();
       const newW = Math.max(5, (s.width || 0) * scaleX);
       const newH = Math.max(5, (s.height || 0) * scaleY);
-      node.scaleX(1);
-      node.scaleY(1);
-      const newX = snap(node.x());
-      const newY = snap(node.y());
-      const rot = Math.round(node.rotation());
       const wM = pxToMeters(newW, calibration);
       const hM = pxToMeters(newH, calibration);
       const xM = pxToMeters(newX, calibration);
@@ -756,7 +765,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   };
 
   const allShapes = [...shapes, newShape].filter(Boolean) as EditorShape[];
-  const isPanningActive = tool === 'pan' || isSpacePanning;
+  const isPanningActive = tool === 'pan' || isSpacePanning || isMiddlePanning;
 
   return (
     <div ref={containerRef} className="w-full h-full bg-slate-200 select-none relative overflow-hidden">
@@ -765,9 +774,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         width={containerSize.w}
         height={containerSize.h}
         onWheel={handleWheel}
-        onMouseDown={handleMouseDown}
+        onMouseDown={(e: KonvaEventObject<MouseEvent>) => {
+          // Middle mouse button (button === 1) → activate pan regardless of current tool
+          if (e.evt.button === 1) {
+            e.evt.preventDefault();
+            setIsMiddlePanning(true);
+            return;
+          }
+          handleMouseDown(e);
+        }}
         onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
+        onMouseUp={(e: KonvaEventObject<MouseEvent>) => {
+          if (e.evt.button === 1) {
+            setIsMiddlePanning(false);
+            return;
+          }
+          handleMouseUp(e);
+        }}
         onDblClick={() => {
           if (tool === 'polygon' && polygonDraftPoints.length >= 6) {
             finishPolygon();

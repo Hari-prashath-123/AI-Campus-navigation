@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Plus, Search, Map as MapIcon, Building2, ArrowRight } from 'lucide-react';
+import { Plus, Search, Map as MapIcon, Building2, ArrowRight, Trash2, AlertTriangle } from 'lucide-react';
 import { campusService } from '../api/campus.service';
 import { organizationService } from '../api/organization.service';
 import { Campus } from '../types';
@@ -29,6 +29,11 @@ export const CampusList: React.FC = () => {
   const [newCampusDesc, setNewCampusDesc] = useState('');
   const [selectedOrgId, setSelectedOrgId] = useState<string>('');
   const [saving, setSaving] = useState(false);
+
+  // Delete campus state
+  const [campusToDelete, setCampusToDelete] = useState<Campus | null>(null);
+  const [deleteInfo, setDeleteInfo] = useState<{ issues: string[]; stats: any } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const navigate = useNavigate();
 
@@ -74,6 +79,30 @@ export const CampusList: React.FC = () => {
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDeleteRequest = async (campus: Campus, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const info = await campusService.canDeleteCampus(campus.id);
+    setCampusToDelete(campus);
+    setDeleteInfo({ issues: info.issues, stats: info.stats });
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!campusToDelete) return;
+    try {
+      setDeleting(true);
+      // Force cascade delete so buildings, floors, objects, and nodes are cleaned up
+      const res = await campusService.deleteCampus(campusToDelete.id, true);
+      if (res.success) {
+        setCampusToDelete(null);
+        setDeleteInfo(null);
+        await loadCampuses();
+      }
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -139,32 +168,42 @@ export const CampusList: React.FC = () => {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filtered.map(campus => (
-              <Link key={campus.id} to={`/admin/campuses/${campus.id}`} className="group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all flex flex-col h-full overflow-hidden">
-                <div className="h-32 bg-slate-100 relative">
-                  <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(#94a3b8 1px, transparent 1px)', backgroundSize: '16px 16px' }}></div>
-                  <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-md text-xs font-bold text-slate-700 shadow-sm border border-white/50">
-                    {campus.code}
-                  </div>
-                </div>
-                <div className="p-5 flex-1 flex flex-col">
-                  <h3 className="font-outfit font-bold text-lg text-slate-900 group-hover:text-blue-600 transition-colors">
-                    {campus.name.en}
-                  </h3>
-                  <p className="text-sm text-slate-500 mt-1 line-clamp-2">
-                    {campus.description?.en || 'No description provided.'}
-                  </p>
-                  
-                  <div className="mt-auto pt-4 flex items-center justify-between">
-                    <div className="flex items-center gap-1 text-slate-400 text-sm">
-                      <Building2 size={16} />
-                      <span>Manage buildings & floors</span>
-                    </div>
-                    <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors">
-                      <ArrowRight size={16} />
+              <div key={campus.id} className="relative group/card">
+                <Link to={`/admin/campuses/${campus.id}`} className="group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all flex flex-col h-full overflow-hidden">
+                  <div className="h-32 bg-slate-100 relative">
+                    <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(#94a3b8 1px, transparent 1px)', backgroundSize: '16px 16px' }}></div>
+                    <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-md text-xs font-bold text-slate-700 shadow-sm border border-white/50">
+                      {campus.code}
                     </div>
                   </div>
-                </div>
-              </Link>
+                  <div className="p-5 flex-1 flex flex-col">
+                    <h3 className="font-outfit font-bold text-lg text-slate-900 group-hover:text-blue-600 transition-colors">
+                      {campus.name.en}
+                    </h3>
+                    <p className="text-sm text-slate-500 mt-1 line-clamp-2">
+                      {campus.description?.en || 'No description provided.'}
+                    </p>
+                    
+                    <div className="mt-auto pt-4 flex items-center justify-between">
+                      <div className="flex items-center gap-1 text-slate-400 text-sm">
+                        <Building2 size={16} />
+                        <span>Manage buildings &amp; floors</span>
+                      </div>
+                      <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors">
+                        <ArrowRight size={16} />
+                      </div>
+                    </div>
+                  </div>
+                </Link>
+                {/* Delete button — appears on card hover */}
+                <button
+                  onClick={(e) => handleDeleteRequest(campus, e)}
+                  title="Delete campus"
+                  className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center text-slate-400 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-colors opacity-0 group-hover/card:opacity-100"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
             ))}
           </div>
         )}

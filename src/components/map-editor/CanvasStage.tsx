@@ -592,6 +592,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (onNodeCreated && activeCampusId) {
         const nodeId = uuidv4();
         let targetBuildingId = activeBuildingId;
+        let resolvedNodeType = nodeTypeToCreate;
         let nodeLabel = `${nodeTypeToCreate.charAt(0).toUpperCase() + nodeTypeToCreate.slice(1)} (${Math.round(sp.x)}, ${Math.round(sp.y)})`;
 
         // If placing an Entrance (Main or Side), auto-detect nearest building and link to it
@@ -617,10 +618,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           const nearestShape = candidates[0];
 
           if (nearestShape) {
-            targetBuildingId = nearestShape.objectId || nearestShape.id;
-            nodeLabel = nodeTypeToCreate === 'entrance' 
-              ? `${nearestShape.name} - Main Entrance`
-              : `${nearestShape.name} - Side Entrance`;
+            const isBuildingShape = nearestShape.objectTypeId === 'building' ||
+              nearestShape.attributes?.isBuilding ||
+              nearestShape.attributes?.elementCategory === 'building' ||
+              /\b(building|block|hall|admin)\b/i.test(nearestShape.name || '');
+
+            // A Main Entrance dropped onto a room is its internal door, not a
+            // campus/building entrance. Preserve the building ownership and
+            // associate the door with that room so routing stays indoors.
+            if (nodeTypeToCreate === 'entrance' && activeFloorId && !isBuildingShape) {
+              resolvedNodeType = 'door';
+              nodeLabel = `${nearestShape.name} - Room Door`;
+            } else {
+              targetBuildingId = nearestShape.objectId || nearestShape.id;
+              nodeLabel = nodeTypeToCreate === 'entrance'
+                ? `${nearestShape.name} - Main Entrance`
+                : `${nearestShape.name} - Side Entrance`;
+            }
 
             // Auto-bind this entrance door to the building shape
             if (onShapeUpdated) {
@@ -643,7 +657,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           campusId: activeCampusId,
           buildingId: targetBuildingId,
           floorId: activeFloorId,
-          type: nodeTypeToCreate,
+          type: resolvedNodeType,
           coordinates: { x: sp.x, y: sp.y },
           isAccessible: true,
           label: nodeLabel,

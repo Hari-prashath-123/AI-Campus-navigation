@@ -87,6 +87,17 @@ export const UserNavigationPage: React.FC = () => {
     const buildingId = obj.buildingId || (obj.floorId ? floorMap.get(obj.floorId)?.buildingId : undefined);
     if (!buildingId) return undefined;
 
+    // The declared outdoor entrance is the authoritative campus anchor. It
+    // keeps the campus overlay on the walkable network instead of projecting
+    // a floor-plan coordinate onto an arbitrary building edge.
+    const outdoorEntrance = nodes.find(node =>
+      node.buildingId === buildingId &&
+      !node.floorId &&
+      (node.type === 'entrance' || node.type === 'outdoor_waypoint') &&
+      node.coordinates
+    );
+    if (outdoorEntrance) return outdoorEntrance.coordinates;
+
     const building = buildingMap.get(buildingId);
     const buildingName = (building ? (typeof building.name === 'string' ? building.name : building.name?.en || '') : '').trim().toLowerCase();
     const buildingShape = editorShapes.find(shape =>
@@ -107,7 +118,10 @@ export const UserNavigationPage: React.FC = () => {
   // ─── Visible pins matching the current active view ─────────────────────────
   const visibleSourcePin = useMemo(() => {
     if (!sourcePinPos && !sourceObj) return undefined;
-    if (view.level === 'campus') {
+    if (view.level === 'campus' || view.level === 'building') {
+      // A building is represented on the campus map by its entrance anchor,
+      // never by the floor-plan/object centre stored when it was selected.
+      if (sourceObj?.category === 'building') return getCampusBuildingAnchor(sourceObj);
       if (sourcePinPos?.level === 'campus') return { x: sourcePinPos.x, y: sourcePinPos.y };
       if (sourceObj && !sourceObj.floorId && sourceObj.coordinates && (sourceObj.coordinates.x > 0 || sourceObj.coordinates.y > 0)) {
         return sourceObj.coordinates;
@@ -124,11 +138,12 @@ export const UserNavigationPage: React.FC = () => {
       return undefined;
     }
     return undefined;
-  }, [sourcePinPos, sourceObj, view, editorShapes, floorMap, buildingMap]);
+  }, [sourcePinPos, sourceObj, view, editorShapes, floorMap, buildingMap, nodes]);
 
   const visibleDestPin = useMemo(() => {
     if (!destPinPos && !destObj) return undefined;
-    if (view.level === 'campus') {
+    if (view.level === 'campus' || view.level === 'building') {
+      if (destObj?.category === 'building') return getCampusBuildingAnchor(destObj);
       if (destPinPos?.level === 'campus') return { x: destPinPos.x, y: destPinPos.y };
       if (destObj && !destObj.floorId && destObj.coordinates && (destObj.coordinates.x > 0 || destObj.coordinates.y > 0)) {
         return destObj.coordinates;
@@ -145,10 +160,58 @@ export const UserNavigationPage: React.FC = () => {
       return undefined;
     }
     return undefined;
-  }, [destPinPos, destObj, view, editorShapes, floorMap, buildingMap]);
+  }, [destPinPos, destObj, view, editorShapes, floorMap, buildingMap, nodes]);
 
   // ─── Derive currentFloorId from view ───────────────────────────────────────
   const currentFloorId = view.floorId || '';
+
+  // Campus entrance nodes keep campus coordinates in storage, but the floor
+  // editor shows them projected onto the relevant outer edge. Reuse that
+  // projection for the user-facing route so the line enters the floor at the
+  // exact Main/Side Entrance the editor displays.
+  const floorEntrancePositions = useMemo<Record<string, { x: number; y: number }>>(() => {
+    if (view.level !== 'floor' || !view.buildingId) return {};
+
+    let campusShapes: EditorShape[] = [];
+    for (const key of [`editor-shapes-${view.campusId}`, `editor-shapes-${view.campusId}--`]) {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(key) || '[]');
+        if (Array.isArray(parsed) && parsed.length) { campusShapes = parsed; break; }
+      } catch {}
+    }
+    const building = buildingMap.get(view.buildingId);
+    const name = building ? (typeof building.name === 'string' ? building.name : building.name?.en || '').trim().toLowerCase() : '';
+    const shape = campusShapes.find(item =>
+      item.objectId === view.buildingId ||
+      item.id === view.buildingId ||
+      item.attributes?.buildingId === view.buildingId ||
+      Boolean(name && item.name?.trim().toLowerCase() === name)
+    );
+    if (!shape) return {};
+
+    const bx = shape.x;
+    const by = shape.y;
+    const bw = shape.width || 120;
+    const bh = shape.height || 100;
+    const positions: Record<string, { x: number; y: number }> = {};
+
+    nodes.filter(node =>
+      node.buildingId === view.buildingId &&
+      !node.floorId &&
+      (node.type === 'entrance' || node.type === 'outdoor_waypoint')
+    ).forEach(node => {
+      const { x, y } = node.coordinates;
+      const distances = [Math.abs(y - by), Math.abs(y - (by + bh)), Math.abs(x - bx), Math.abs(x - (bx + bw))];
+      const edge = distances.indexOf(Math.min(...distances));
+      const relX = Math.max(0.12, Math.min(0.88, (x - bx) / bw));
+      const relY = Math.max(0.12, Math.min(0.88, (y - by) / bh));
+      positions[node.id] = edge === 0 ? { x: Math.round(relX * 1200), y: 6 }
+        : edge === 1 ? { x: Math.round(relX * 1200), y: 954 }
+        : edge === 2 ? { x: 6, y: Math.round(relY * 960) }
+        : { x: 1194, y: Math.round(relY * 960) };
+    });
+    return positions;
+  }, [view, nodes, buildingMap]);
 
   // ─── Load 2D map shapes for current view ───────────────────────────────────
   useEffect(() => {
@@ -507,7 +570,7 @@ export const UserNavigationPage: React.FC = () => {
     if (dropdownScope === 'all') {
       return cleanDestinations;
     }
-    if (view.level === 'campus') {
+    if (view.level === 'campus' || view.level === 'building') {
       // In Campus view: Show buildings, parking, main gates, outdoor landmarks
       const campusObjs = cleanDestinations.filter(o => !o.floorId || o.category === 'entrance' || o.category === 'landmark');
       // Also synthesize building destinations from buildings list if not in objects
@@ -518,16 +581,7 @@ export const UserNavigationPage: React.FC = () => {
         name: b.name,
         code: b.code,
         category: 'building' as any,
-        coordinates: (() => {
-          const bName = (typeof b.name === 'string' ? b.name : b.name?.en || '').toLowerCase().trim();
-          const bShape = editorShapes.find(s =>
-            s.objectId === b.id || s.id === b.id ||
-            (s.name && (s.name.toLowerCase().trim() === bName || s.name.toLowerCase().includes(bName) || bName.includes(s.name.toLowerCase().trim())))
-          );
-          return bShape
-            ? { x: Math.round(bShape.x + (bShape.width || 120) / 2), y: Math.round(bShape.y + (bShape.height || 100) / 2) }
-            : { x: 400, y: 400 };
-        })(),
+        coordinates: getCampusBuildingAnchor({ buildingId: b.id } as MapObject) || { x: 400, y: 400 },
         buildingId: b.id,
         floorId: '',
         objectTypeId: 'building',
@@ -609,30 +663,47 @@ export const UserNavigationPage: React.FC = () => {
   }, [sourceObj, destObj, mode, accessible, calculateRoute]);
 
   const selectSource = (obj: MapObject) => {
-    // Upsert into objects so MapViewer can find and render the pin
-    objectStore.create(obj);
-    setObjects(prev => [...prev.filter(o => o.id !== obj.id), obj]);
+    // Keep the persisted entrance association when a campus building is picked
+    // from the synthetic building list. Creating a second object with the same
+    // ID used to discard that association and break routing.
+    const stored = objectStore.getById(obj.id);
+    const selected = {
+      ...stored,
+      ...obj,
+      associatedNodeId: obj.associatedNodeId || stored?.associatedNodeId || '',
+      entranceNodeIds: obj.entranceNodeIds?.length ? obj.entranceNodeIds : (stored?.entranceNodeIds || []),
+    } as MapObject;
+    if (stored) objectStore.update(selected.id, selected);
+    else objectStore.create(selected);
+    setObjects(prev => [...prev.filter(o => o.id !== selected.id), selected]);
     // Set pin position if coordinates are valid canvas coords
-    if (obj.coordinates && (obj.coordinates.x > 0 || obj.coordinates.y > 0)) {
-      const pinLevel = obj.floorId ? 'floor' : 'campus';
-      setSourcePinPos({ x: obj.coordinates.x, y: obj.coordinates.y, level: pinLevel as any, floorId: obj.floorId || undefined });
+    if (selected.coordinates && (selected.coordinates.x > 0 || selected.coordinates.y > 0)) {
+      const pinLevel = selected.floorId ? 'floor' : 'campus';
+      setSourcePinPos({ x: selected.coordinates.x, y: selected.coordinates.y, level: pinLevel as any, floorId: selected.floorId || undefined });
     }
-    setSourceObj(obj);
-    setSourceQuery(typeof obj.name === 'string' ? obj.name : obj.name?.en || obj.code);
+    setSourceObj(selected);
+    setSourceQuery(typeof selected.name === 'string' ? selected.name : selected.name?.en || selected.code);
     setIsSearchingSource(false);
     setPickMode(null);
   };
   const selectDest = (obj: MapObject) => {
-    // Upsert into objects so MapViewer can find and render the pin
-    objectStore.create(obj);
-    setObjects(prev => [...prev.filter(o => o.id !== obj.id), obj]);
+    const stored = objectStore.getById(obj.id);
+    const selected = {
+      ...stored,
+      ...obj,
+      associatedNodeId: obj.associatedNodeId || stored?.associatedNodeId || '',
+      entranceNodeIds: obj.entranceNodeIds?.length ? obj.entranceNodeIds : (stored?.entranceNodeIds || []),
+    } as MapObject;
+    if (stored) objectStore.update(selected.id, selected);
+    else objectStore.create(selected);
+    setObjects(prev => [...prev.filter(o => o.id !== selected.id), selected]);
     // Set pin position if coordinates are valid canvas coords
-    if (obj.coordinates && (obj.coordinates.x > 0 || obj.coordinates.y > 0)) {
-      const pinLevel = obj.floorId ? 'floor' : 'campus';
-      setDestPinPos({ x: obj.coordinates.x, y: obj.coordinates.y, level: pinLevel as any, floorId: obj.floorId || undefined });
+    if (selected.coordinates && (selected.coordinates.x > 0 || selected.coordinates.y > 0)) {
+      const pinLevel = selected.floorId ? 'floor' : 'campus';
+      setDestPinPos({ x: selected.coordinates.x, y: selected.coordinates.y, level: pinLevel as any, floorId: selected.floorId || undefined });
     }
-    setDestObj(obj);
-    setDestQuery(typeof obj.name === 'string' ? obj.name : obj.name?.en || obj.code);
+    setDestObj(selected);
+    setDestQuery(typeof selected.name === 'string' ? selected.name : selected.name?.en || selected.code);
     setIsSearchingDest(false);
     setPickMode(null);
   };
@@ -652,7 +723,7 @@ export const UserNavigationPage: React.FC = () => {
         // Match objects strictly within the same floor/level context
         targetObj = objects.find(o => {
           // Level filter: campus view → outdoor objects only; floor view → same floor only
-          if (view.level === 'campus') {
+          if (view.level === 'campus' || view.level === 'building') {
             if (o.floorId && o.floorId !== '') return false;
           } else if (view.level === 'floor' || view.level === 'room') {
             if (!view.floorId || o.floorId !== view.floorId) return false;
@@ -667,7 +738,7 @@ export const UserNavigationPage: React.FC = () => {
 
       if (!targetObj) {
         // If clicked on building on campus map
-        if (view.level === 'campus') {
+        if (view.level === 'campus' || view.level === 'building') {
           const matchedBld = buildings.find(b => {
             const bName = (typeof b.name === 'string' ? b.name : b.name?.en || '').toLowerCase();
             return b.id === clickedShape.objectId || (shapeName && shapeName.includes(bName));
@@ -1265,10 +1336,11 @@ export const UserNavigationPage: React.FC = () => {
                 shapes={editorShapes}
                 onShapeClick={handleShapeClick}
                 isRoomView={view.level === 'room'}
-                isCampusView={view.level === 'campus'}
+                isCampusView={view.level === 'campus' || view.level === 'building'}
                 pickMode={pickMode}
                 onCanvasPick={handleCanvasPick}
                 pinPositions={{ source: visibleSourcePin, dest: visibleDestPin }}
+                floorEntrancePositions={floorEntrancePositions}
                 onPinDrag={handlePinDrag}
               />
             </div>

@@ -331,7 +331,9 @@ export class RoutingEngine {
         Array.from(targetEntrances).some(id => id.toLowerCase().includes('isolated'))
       );
 
-      // If gap is within road drawing threshold (<= 150px) and not an intentionally isolated test entity, bridge it
+      // Heal only small drawing gaps. Larger gaps must follow explicit road
+      // segments; joining them directly would draw a route through buildings
+      // or lawns instead of on the mapped path.
       if (!isIsolated && bestFrom && bestTo && minGap <= 150) {
         const bridgeEdge: CampusConnection = {
           id: `heal_gap_${bestFrom.id}_${bestTo.id}`,
@@ -833,6 +835,18 @@ export const routingService = {
       let sEnts = engine.resolveEntrances(sourceObj);
       let tEnts = engine.resolveEntrances(targetObj);
 
+      // A room/lab selected on a floor map is a destination inside that space,
+      // not merely its building's similarly named entrance. If it has no
+      // explicit door association, create a virtual endpoint at its actual
+      // selected position so the indoor part of the route is rendered.
+      const targetNeedsFloorEndpoint = Boolean(
+        targetObj.floorId &&
+        targetObj.coordinates &&
+        targetObj.category !== 'entrance' &&
+        targetObj.category !== 'building'
+      );
+      if (targetNeedsFloorEndpoint) tEnts = [];
+
       // Guard: don't create virtual nodes for explicitly isolated test objects
       const isIsolatedObj = (obj: typeof sourceObj) =>
         (obj.code && obj.code.toUpperCase().includes('ISOLATED')) ||
@@ -933,7 +947,41 @@ export const routingService = {
 
       // Automatically bridge outdoor campus road network to indoor building ground floor entrances
       const outdoorNodes = nodes.filter(n => !n.floorId || n.floorId === '');
-      const indoorEntrances = nodes.filter(n => Boolean(n.floorId) && (n.type === 'entrance' || n.type === 'door' || (n.label && n.label.toLowerCase().includes('entrance'))));
+      // Only explicit building entrances may bridge an outdoor campus path to
+      // a floor. Room doors are part of the indoor graph and must never be
+      // treated as a way to enter the building from outside.
+      const { campusService: routingCampusService } = await import('./campus.service');
+      const buildingNames = new Map<string, string>();
+      try {
+        const buildingsRes = await routingCampusService.getBuildingsByCampus(campusId);
+        if (buildingsRes.success) {
+          buildingsRes.data.forEach(building => {
+            const name = typeof building.name === 'string' ? building.name : building.name?.en || '';
+            buildingNames.set(building.id, name.trim().toLowerCase());
+          });
+        }
+      } catch {}
+      const indoorEntrances = nodes.filter(node => {
+        if (!node.floorId || node.type !== 'entrance') return false;
+        const buildingName = buildingNames.get(node.buildingId || '');
+        const label = (node.label || '').toLowerCase();
+        const isRoomNamedEntrance = objects.some(object => {
+          if (object.floorId !== node.floorId || object.buildingId !== node.buildingId) return false;
+          if (object.category === 'building' || object.category === 'entrance') return false;
+          const name = (typeof object.name === 'string' ? object.name : object.name?.en || '').trim().toLowerCase();
+          return Boolean(name && label.includes(name) && name !== buildingName);
+        });
+        if (isRoomNamedEntrance) return false;
+
+        // A true exterior entrance is named for its building. This excludes
+        // old room nodes such as "Soil Lab - Main Entrance" that were saved
+        // with the wrong type before the room-door classification fix. The
+        // editor also creates unnamed `Entrance (x, y)` nodes when the
+        // building outline is not present on a floor plan; those are valid
+        // building entrances once they are not associated with a room.
+        const isGenericEntrance = /^(main |side )?entrance\s*(\(|$)/i.test(node.label || '');
+        return Boolean((buildingName && label.includes(buildingName)) || isGenericEntrance);
+      });
 
       if (outdoorNodes.length > 0 && indoorEntrances.length > 0) {
         // Read campus shapes to know where each building sits on the campus map
@@ -951,6 +999,17 @@ export const routingService = {
         }
 
         for (const ent of indoorEntrances) {
+          const bldId = ent.buildingId;
+          const buildingEntrances = outdoorNodes.filter(node =>
+            node.buildingId === bldId &&
+            (node.type === 'entrance' || node.type === 'outdoor_waypoint')
+          );
+
+          // A floor entrance without a matching declared campus entrance is
+          // not an exterior hand-off. This also protects older room nodes that
+          // were accidentally saved as type "entrance".
+          if (buildingEntrances.length === 0) continue;
+
           const alreadyLinked = connections.some(c =>
             (c.sourceNodeId === ent.id && outdoorNodes.some(on => on.id === c.targetNodeId)) ||
             (c.targetNodeId === ent.id && outdoorNodes.some(on => on.id === c.sourceNodeId))
@@ -958,7 +1017,6 @@ export const routingService = {
           if (!alreadyLinked) {
             // Find target anchor position on the campus map
             let campusAnchor = { x: ent.coordinates.x, y: ent.coordinates.y };
-            const bldId = ent.buildingId;
             const entLabel = (ent.label || '').toLowerCase();
 
             // Prefer the persisted building ID.  Legacy maps may only have a
@@ -992,7 +1050,25 @@ export const routingService = {
 
             let closestOut: SpatialNode | null = null;
             let minD = Infinity;
+
+            // A declared campus entrance is the explicit hand-off point for
+            // its own building. Prefer it over a geometrically nearer road
+            // waypoint so routes enter through the Main/Side Entrance the
+            // editor author placed.
+            const sameNamedEntrance = buildingEntrances.find(node => {
+              const label = (node.label || '').toLowerCase();
+              return label.includes('main entrance') || (entLabel && label.includes(entLabel));
+            });
+            if (sameNamedEntrance) {
+              closestOut = sameNamedEntrance;
+              minD = 0;
+            } else if (buildingEntrances.length > 0) {
+              closestOut = buildingEntrances[0];
+              minD = 0;
+            }
+
             for (const on of outdoorNodes) {
+              if (closestOut) break;
               if (!on.coordinates) continue;
               const d = Math.hypot(on.coordinates.x - campusAnchor.x, on.coordinates.y - campusAnchor.y);
               if (d < minD) { minD = d; closestOut = on; }
@@ -1020,6 +1096,76 @@ export const routingService = {
               });
             }
           }
+        }
+      }
+
+      // The outdoor bridge only gets a visitor *to* the floor's declared
+      // building entrance.  Editors commonly place that entrance on the
+      // perimeter and draw the first corridor a short distance away, without
+      // explicitly joining the two nodes.  Complete that single, local
+      // hand-off so the floor portion remains routable as well.
+      //
+      // `indoorEntrances` deliberately contains only entrances named for the
+      // building itself (not e.g. "Soil Lab - Main Entrance"), so a room door
+      // can never become an outside-to-building shortcut here.
+      for (const entrance of indoorEntrances) {
+        const hasFloorAccess = connections.some(connection => {
+          const otherId = connection.sourceNodeId === entrance.id
+            ? connection.targetNodeId
+            : connection.targetNodeId === entrance.id
+              ? connection.sourceNodeId
+              : undefined;
+          if (!otherId) return false;
+          const other = nodes.find(node => node.id === otherId);
+          return Boolean(other && other.floorId === entrance.floorId && other.buildingId === entrance.buildingId);
+        });
+        if (hasFloorAccess) continue;
+
+        const sameFloorNodes = nodes.filter(node =>
+          node.id !== entrance.id &&
+          node.floorId === entrance.floorId &&
+          node.buildingId === entrance.buildingId &&
+          node.coordinates
+        );
+        // Prefer an actual circulation node.  Legacy room entrance nodes are
+        // only a last resort, so they cannot pull a building route sideways.
+        const circulationNodes = sameFloorNodes.filter(node =>
+          node.type !== 'entrance' && node.type !== 'door'
+        );
+        const candidates = circulationNodes.length > 0 ? circulationNodes : sameFloorNodes;
+        let nearest: SpatialNode | undefined;
+        let distance = Infinity;
+        for (const node of candidates) {
+          const d = Math.hypot(
+            node.coordinates.x - entrance.coordinates.x,
+            node.coordinates.y - entrance.coordinates.y,
+          );
+          if (d < distance) {
+            nearest = node;
+            distance = d;
+          }
+        }
+        if (nearest) {
+          connections.push({
+            id: `auto_floor_entrance_${entrance.id}_${nearest.id}`,
+            campusId,
+            sourceNodeId: entrance.id,
+            targetNodeId: nearest.id,
+            sourceBuildingId: entrance.buildingId || '',
+            sourceFloorId: entrance.floorId || '',
+            targetBuildingId: nearest.buildingId || '',
+            targetFloorId: nearest.floorId || '',
+            connectionType: 'entrance',
+            name: `Building entrance access to ${nearest.label || 'floor corridor'}`,
+            isWalkable: true,
+            isBidirectional: true,
+            isAccessible: entrance.isAccessible && nearest.isAccessible,
+            isVehicleAccessible: false,
+            weightMultiplier: 1.0,
+            distanceMeters: Math.max(1, Math.round(distance / 10)),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
         }
       }
 

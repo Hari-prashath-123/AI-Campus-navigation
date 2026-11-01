@@ -835,14 +835,17 @@ export const MapEditor: React.FC<MapEditorProps> = ({
 
     // 4. Auto-generate and sync navigation graph from drawn shapes and paths
     try {
-      const allBuildingNodes = activeBuildingId ? navStore.getNodesByBuilding(activeBuildingId) : floorNodes;
+      // The graph generator returns a complete campus graph. Always give it
+      // every campus node; passing only the active building silently removed
+      // entrances belonging to other buildings whenever this floor was saved.
+      const allCampusNodes = activeCampusId ? navStore.getNodesByCampus(activeCampusId) : floorNodes;
       const allCampusConnections = activeCampusId ? navStore.getConnectionsByCampus(activeCampusId) : campusConnections;
       const res = CampusGraphGenerator.generateGraph(
         activeCampusId,
         activeFloorId,
         activeBuildingId,
         shapes,
-        allBuildingNodes,
+        allCampusNodes,
         allCampusConnections,
         floorObjects,
         calibration,
@@ -951,7 +954,9 @@ export const MapEditor: React.FC<MapEditorProps> = ({
 
   // Automated & Incremental Navigation Graph Generator
   const handleGenerateGraph = useCallback(() => {
-    const allBuildingNodes = activeBuildingId ? navStore.getNodesByBuilding(activeBuildingId) : floorNodes;
+    // Preserve nodes for every building when rebuilding one floor. The
+    // generator itself selects the active floor and retains everything else.
+    const allCampusNodes = activeCampusId ? navStore.getNodesByCampus(activeCampusId) : floorNodes;
     const allCampusConnections = activeCampusId ? navStore.getConnectionsByCampus(activeCampusId) : campusConnections;
 
     const res = CampusGraphGenerator.generateGraph(
@@ -959,7 +964,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       activeFloorId,
       activeBuildingId,
       shapes,
-      allBuildingNodes,
+      allCampusNodes,
       allCampusConnections,
       floorObjects,
       calibration,
@@ -1771,13 +1776,10 @@ export const MapEditor: React.FC<MapEditorProps> = ({
               activeBuildingId={activeBuildingId}
               activeFloorId={activeFloorId}
               onNodeCreated={(node) => {
-                // When marking an entrance for a building, ensure it associates with that building's ground floor
-                if ((node.type === 'entrance' || node.type === 'outdoor_waypoint') && node.buildingId) {
-                  const bldGround = floors.find(f => f.buildingId === node.buildingId && (f.level === 0 || f.level === 1));
-                  if (bldGround && !node.floorId) {
-                    node.floorId = bldGround.id;
-                  }
-                }
+                // A node placed on the campus canvas remains an outdoor node,
+                // even when it is associated with a building. Its blank floor
+                // ID is what lets the route graph connect the campus path to
+                // the building entrance and makes the node persist on reload.
                 createNode(node);
                 setSelectedNode(node);
                 setSelectedIds([]);

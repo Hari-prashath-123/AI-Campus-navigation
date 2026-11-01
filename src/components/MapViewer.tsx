@@ -24,6 +24,8 @@ export interface MapViewerProps {
   pickMode?: 'start' | 'dest' | null;
   onCanvasPick?: (coords: { x: number; y: number }, shape?: EditorShape, obj?: MapObject) => void;
   pinPositions?: { source?: { x: number; y: number }; dest?: { x: number; y: number } };
+  /** Campus entrance node positions projected into the active floor plan. */
+  floorEntrancePositions?: Record<string, { x: number; y: number }>;
   onPinDrag?: (which: 'source' | 'dest', newCanvasCoords: { x: number; y: number }) => void;
 }
 
@@ -47,6 +49,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   pickMode = null,
   onCanvasPick,
   pinPositions,
+  floorEntrancePositions = {},
   onPinDrag,
 }) => {
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -418,28 +421,35 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       });
     }
 
-    // Helper to get screen coordinates for any node (handles meters <= 100 or canvas pixels > 100)
+    // Editor shapes and their navigation nodes share the same 1200 × 960 pixel
+    // coordinate space. Do not reinterpret small pixel values as metres here:
+    // rooms near the top-left of a plan would otherwise have their route shifted.
     const getNodeScreenPt = (coord: { x: number; y: number }) => {
       if (shapes.length > 0) {
-        const isMeters = coord.x <= 100 && coord.y <= 100;
-        const px = isMeters ? coord.x * 12 : coord.x;
-        const py = isMeters ? coord.y * 12 : coord.y;
-        return shapeToScreen(px, py);
+        return shapeToScreen(coord.x, coord.y);
       }
       return toScreenCoords(coord);
     };
 
-    // 3. Draw Active Route on current floor / campus
-    if (routeResult && ((routeResult.nodes?.length || 0) > 0 || (routeResult.pathNodes?.length || 0) > 0)) {
+    // 3. Draw Active Route on current floor / campus. Campus endpoints always
+    // receive an outdoor leg when both pins are known; this remains visible
+    // while the indoor graph is resolving its entrance hand-off.
+    const hasRouteNodes = Boolean(routeResult && ((routeResult.nodes?.length || 0) > 0 || (routeResult.pathNodes?.length || 0) > 0));
+    // Campus-level selections can be rendered directly from their object
+    // coordinates if a drag-pin state has not been created yet.
+    const campusSource = pinPositions?.source || (!sourceObj?.floorId ? sourceObj?.coordinates : undefined);
+    const campusDestination = pinPositions?.dest || (!destObj?.floorId ? destObj?.coordinates : undefined);
+    const hasCampusEndpoints = viewingCampus && Boolean(campusSource && campusDestination);
+    if (hasRouteNodes || hasCampusEndpoints) {
       // Build lookup map from prop nodes + resolved pathNodes
       const allNodeMap = new Map(nodes.map(n => [n.id, n]));
-      if (routeResult.pathNodes) {
+      if (routeResult?.pathNodes) {
         routeResult.pathNodes.forEach(n => { if (!allNodeMap.has(n.id)) allNodeMap.set(n.id, n); });
       }
 
-      const fullPathNodes = (routeResult.pathNodes && routeResult.pathNodes.length > 0)
+      const fullPathNodes = (routeResult?.pathNodes && routeResult.pathNodes.length > 0)
         ? routeResult.pathNodes
-        : routeResult.nodes.map(id => allNodeMap.get(id)).filter(Boolean) as SpatialNode[];
+        : (routeResult?.nodes || []).map(id => allNodeMap.get(id)).filter(Boolean) as SpatialNode[];
 
       const curFloor = currentFloorId || '';
       const isCampus = viewingCampus;
@@ -447,44 +457,16 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       const segments: { x: number; y: number }[][] = [];
 
       if (isCampus) {
-        // ── Campus View: collect continuous outdoor path coordinates ──
-        const campusPts: { x: number; y: number }[] = [];
-
-        // If route starts inside a building, prepend the building entrance anchor on campus
-        if (pinPositions?.source && sourceObj?.floorId) {
-          campusPts.push({ x: pinPositions.source.x, y: pinPositions.source.y });
-        } else if (pinPositions?.source && !campusPts.some(p => p.x === pinPositions.source!.x && p.y === pinPositions.source!.y)) {
-          campusPts.push({ x: pinPositions.source.x, y: pinPositions.source.y });
-        }
-
-        // Add all outdoor waypoints along the route
-        fullPathNodes.forEach(node => {
-          if (!node.floorId || node.floorId === '') {
-            if (node.coordinates && (node.coordinates.x > 0 || node.coordinates.y > 0)) {
-              // Avoid exact duplicate adjacent points
-              const last = campusPts[campusPts.length - 1];
-              if (!last || Math.hypot(last.x - node.coordinates.x, last.y - node.coordinates.y) > 2) {
-                campusPts.push(node.coordinates);
-              }
-            }
-          }
-        });
-
-        // If route ends inside a building, append the destination building entrance anchor on campus
-        if (pinPositions?.dest && destObj?.floorId) {
-          const last = campusPts[campusPts.length - 1];
-          if (!last || Math.hypot(last.x - pinPositions.dest.x, last.y - pinPositions.dest.y) > 2) {
-            campusPts.push({ x: pinPositions.dest.x, y: pinPositions.dest.y });
-          }
-        } else if (pinPositions?.dest) {
-          const last = campusPts[campusPts.length - 1];
-          if (!last || Math.hypot(last.x - pinPositions.dest.x, last.y - pinPositions.dest.y) > 2) {
-            campusPts.push({ x: pinPositions.dest.x, y: pinPositions.dest.y });
-          }
-        }
-
-        if (campusPts.length >= 2) {
-          segments.push(campusPts);
+        // ── Campus View: never mix floor-plan nodes with campus coordinates.
+        // The outdoor leg is deliberately rendered only between the campus
+        // source and destination anchors. This keeps it on the campus plan
+        // when a destination was chosen from a building floor.
+        if (campusSource && campusDestination) {
+          const start = campusSource;
+          const end = campusDestination;
+          // Leave the gate vertically, then turn horizontally to the building
+          // entrance. This matches the orthogonal campus-road presentation.
+          segments.push([start, { x: start.x, y: end.y }, end]);
         }
       } else {
         // ── Floor View: group path nodes on current floor ──
@@ -492,8 +474,9 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         for (let i = 0; i < fullPathNodes.length; i++) {
           const node = fullPathNodes[i];
           const nodeFloor = node.floorId || '';
-          if (nodeFloor === curFloor) {
-            curSegment.push(node.coordinates);
+          const projectedEntrance = !nodeFloor ? floorEntrancePositions[node.id] : undefined;
+          if (nodeFloor === curFloor || projectedEntrance) {
+            curSegment.push(projectedEntrance || node.coordinates);
           } else {
             if (curSegment.length > 0) {
               segments.push(curSegment);
@@ -573,7 +556,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       });
 
       // Highlight Floor Transition Points (Elevator / Stairs / Bridge)
-      if (routeResult.transitions && routeResult.transitions.length > 0) {
+      if (routeResult?.transitions && routeResult.transitions.length > 0) {
         routeResult.transitions.forEach(tr => {
           const fromNode = allNodeMap.get(tr.fromNodeId);
           const toNode = allNodeMap.get(tr.toNodeId);
@@ -809,7 +792,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     if (pinPositions?.dest) drawExplicitPin(pinPositions.dest, 'B', '#ef4444', '#b91c1c', destTitle);
 
 
-  }, [dimensions, zoom, pan, objects, nodes, connections, routeResult, currentFloorId, isCampusView, sourceObj, destObj, selectedObj, toScreenCoords, shapes, shapeToScreen, pinPositions]);
+  }, [dimensions, zoom, pan, objects, nodes, connections, routeResult, currentFloorId, isCampusView, sourceObj, destObj, selectedObj, toScreenCoords, shapes, shapeToScreen, pinPositions, floorEntrancePositions]);
 
   // Click handler to select object, pick on map, or drill-down
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {

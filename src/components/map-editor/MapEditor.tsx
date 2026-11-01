@@ -272,8 +272,28 @@ export const MapEditor: React.FC<MapEditorProps> = ({
   // Snapping & Measurement & Fit-to-View
   const [isSnapping, setIsSnapping] = useState(true);
   const [gridSize] = useState(20);
+  // In room interior mode, use fine 4px grid (~30cm) for minute detail placement
+  const activeGridSize = activeRoomId ? 4 : gridSize;
   const [pointerCoords, setPointerCoords] = useState<Point2D>({ x: 0, y: 0 });
   const [calibration, setCalibration] = useState<MapCalibration>(DEFAULT_CALIBRATION);
+  // Ref to read calibration inside effects without creating dependency cycles
+  const calibrationRef = useRef<MapCalibration>(DEFAULT_CALIBRATION);
+  useEffect(() => { calibrationRef.current = calibration; }, [calibration]);
+
+  // Restore floor calibration when leaving room interior mode
+  useEffect(() => {
+    if (!activeRoomId) {
+      if (activeFloor) {
+        setCalibration({
+          ...DEFAULT_CALIBRATION,
+          realWidthMeters: activeFloor.dimensions.widthMeters,
+          realHeightMeters: activeFloor.dimensions.heightMeters,
+        });
+      } else {
+        setCalibration(DEFAULT_CALIBRATION);
+      }
+    }
+  }, [activeRoomId, activeFloor]);
   const [showCalibration, setShowCalibration] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [showPreview, setShowPreview] = useState(false);
@@ -402,37 +422,199 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     const key = getStorageKey();
     const data = localStorage.getItem(key);
 
-    // Room Interior Mode: if saved data exists, verify it contains room boundary; otherwise generate fresh
+    // Room Interior Mode: shape and entrance must match the floor map definition
     if (activeRoomId) {
-      if (data) {
-        try {
-          const parsed = JSON.parse(data);
-          if (Array.isArray(parsed) && parsed.some(s => s.id === `room_boundary_${activeRoomId}` || s.attributes?.isRoomPerimeter)) {
-            clearHistory(parsed);
-            prevShapeCount.current = parsed.length;
-            prevShapesHash.current = JSON.stringify(parsed);
-            setSaveStatus('saved');
-            return;
-          }
-        } catch (e) {}
-      }
-      // Generate initial room boundary & door
       const rObj = objectStore.getById(activeRoomId);
-      const rName = rObj ? (typeof rObj.name === 'string' ? rObj.name : rObj.name.en) : 'Room';
+      const rName = (rObj ? (typeof rObj.name === 'string' ? rObj.name : rObj.name?.en) : '') || '';
+      const rCode = rObj?.code || '';
+
+      // 1. Search localStorage across possible floor keys for the floor shapes
+      let parsedFloor: EditorShape[] = [];
+      const floorKeyExact = `editor-shapes-${activeCampusId}-${activeBuildingId}-${activeFloorId}`;
+      const directFloorData = localStorage.getItem(floorKeyExact);
+      if (directFloorData) {
+        try { parsedFloor = JSON.parse(directFloorData); } catch (e) {}
+      }
+      if (parsedFloor.length === 0) {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith('editor-shapes-') && k.includes(activeFloorId) && !k.endsWith(activeRoomId)) {
+            try {
+              const arr = JSON.parse(localStorage.getItem(k) || '[]');
+              if (Array.isArray(arr) && arr.length > 0) {
+                parsedFloor = arr;
+                break;
+              }
+            } catch (e) {}
+          }
+        }
+      }
+
+      // 2. Find the floor shape that defines this room
+      let floorRoomShape: EditorShape | null = null;
+      if (parsedFloor.length > 0) {
+        floorRoomShape = parsedFloor.find(s => {
+          if (s.objectId && s.objectId === activeRoomId) return true;
+          if (s.id && s.id === activeRoomId) return true;
+          if (s.id && s.id === `shape_${activeRoomId}`) return true;
+          const sName = (s.name || '').toLowerCase().trim();
+          if (rName && sName === rName.toLowerCase().trim()) return true;
+          if (rCode && sName === rCode.toLowerCase().trim()) return true;
+          if (rName && (sName.includes(rName.toLowerCase().trim()) || rName.toLowerCase().trim().includes(sName))) return true;
+          return false;
+        }) || null;
+      }
+
+      // 3. Find the entrance door position on the floor map
+      let floorDoorPt: { x: number; y: number } | null = null;
+      if (floorRoomShape) {
+        const assocNodeId = floorRoomShape.attributes?.associatedNodeId;
+        const assocNodeIds = floorRoomShape.attributes?.entranceNodeIds || [];
+        const campusNodes = navStore.getNodesByCampus(activeCampusId);
+        let doorNode = campusNodes.find(n =>
+          n.id === assocNodeId ||
+          assocNodeIds.includes(n.id) ||
+          n.associatedObjectId === activeRoomId
+        );
+
+        if (!doorNode && rName) {
+          doorNode = campusNodes.find(n =>
+            n.floorId === activeFloorId &&
+            n.type === 'entrance' &&
+            n.label && n.label.toLowerCase().includes(rName.toLowerCase())
+          );
+        }
+
+        if (doorNode) {
+          floorDoorPt = { x: doorNode.coordinates.x, y: doorNode.coordinates.y };
+        } else {
+          // Search in parsedFloor for entrance shapes near floorRoomShape
+          const doorShape = parsedFloor.find(s =>
+            (s.objectTypeId === 'entrance' || s.objectTypeId === 'door' || /door|entrance/i.test(s.name)) &&
+            Math.hypot((s.x - floorRoomShape!.x), (s.y - floorRoomShape!.y)) < 300
+          );
+          if (doorShape) floorDoorPt = { x: doorShape.x, y: doorShape.y };
+        }
+      }
+
+      // 4. Calculate Room Editor Canvas dimensions matching the room's exact shape
+      let fw = floorRoomShape?.width || 240;
+      let fh = floorRoomShape?.height || 160;
+      const isPolygon = floorRoomShape?.geometryType === 'polygon' && Boolean(floorRoomShape.points && floorRoomShape.points.length >= 6);
+      let polyPoints = floorRoomShape?.points || [];
+
+      if (isPolygon) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (let i = 0; i < polyPoints.length; i += 2) {
+          minX = Math.min(minX, polyPoints[i]);
+          maxX = Math.max(maxX, polyPoints[i]);
+          minY = Math.min(minY, polyPoints[i + 1]);
+          maxY = Math.max(maxY, polyPoints[i + 1]);
+        }
+        fw = Math.max(40, maxX - minX);
+        fh = Math.max(40, maxY - minY);
+      }
+
+      // Compute Canvas Width & Height so the editor boundary IS the room's shape
+      let canvasW: number;
+      let canvasH: number;
+      if (fw <= fh) {
+        // Vertical room (e.g. Soil Lab)
+        canvasH = 1000;
+        canvasW = Math.max(240, Math.round(1000 * (fw / fh)));
+      } else {
+        // Horizontal room
+        canvasW = 1200;
+        canvasH = Math.max(240, Math.round(1200 * (fh / fw)));
+      }
+
+      // Update calibration so CanvasStage grid & dashed boundary match the room shape
+      const pxPerM = 12; // Standard scale
+      const rwM = Math.max(3, Math.round(fw / pxPerM));
+      const rhM = Math.max(3, Math.round(fh / pxPerM));
+      if (
+        calibrationRef.current.canvasWidthPx !== canvasW ||
+        calibrationRef.current.canvasHeightPx !== canvasH ||
+        calibrationRef.current.realWidthMeters !== rwM ||
+        calibrationRef.current.realHeightMeters !== rhM
+      ) {
+        setCalibration({
+          unitSystem: 'metric',
+          canvasWidthPx: canvasW,
+          canvasHeightPx: canvasH,
+          realWidthMeters: rwM,
+          realHeightMeters: rhM,
+        });
+      }
+
+      // 5. Build Room Boundary shape [0, 0, canvasW, canvasH]
+      let roomPoints: number[] = [];
+      if (isPolygon) {
+        let minX = Infinity, minY = Infinity;
+        for (let i = 0; i < polyPoints.length; i += 2) {
+          minX = Math.min(minX, polyPoints[i]);
+          minY = Math.min(minY, polyPoints[i + 1]);
+        }
+        const scaleX = canvasW / fw;
+        const scaleY = canvasH / fh;
+        for (let i = 0; i < polyPoints.length; i += 2) {
+          roomPoints.push(
+            Math.round((polyPoints[i] - minX) * scaleX),
+            Math.round((polyPoints[i + 1] - minY) * scaleY)
+          );
+        }
+      }
+
+      // 6. Compute Entrance Door position on the room boundary matching the floor map
+      let doorX = Math.round(canvasW / 2);
+      let doorY = canvasH; // default: bottom center
+
+      if (floorRoomShape && floorDoorPt) {
+        const bx = floorRoomShape.x;
+        const by = floorRoomShape.y;
+        const bw = floorRoomShape.width || 240;
+        const bh = floorRoomShape.height || 160;
+
+        const distTop = Math.abs(floorDoorPt.y - by);
+        const distBottom = Math.abs(floorDoorPt.y - (by + bh));
+        const distLeft = Math.abs(floorDoorPt.x - bx);
+        const distRight = Math.abs(floorDoorPt.x - (bx + bw));
+        const minDist = Math.min(distTop, distBottom, distLeft, distRight);
+
+        if (minDist === distBottom) {
+          const rel = Math.max(0.06, Math.min(0.94, (floorDoorPt.x - bx) / bw));
+          doorX = Math.round(rel * canvasW);
+          doorY = canvasH;
+        } else if (minDist === distTop) {
+          const rel = Math.max(0.06, Math.min(0.94, (floorDoorPt.x - bx) / bw));
+          doorX = Math.round(rel * canvasW);
+          doorY = 0;
+        } else if (minDist === distLeft) {
+          const rel = Math.max(0.06, Math.min(0.94, (floorDoorPt.y - by) / bh));
+          doorX = 0;
+          doorY = Math.round(rel * canvasH);
+        } else {
+          // Right wall
+          const rel = Math.max(0.06, Math.min(0.94, (floorDoorPt.y - by) / bh));
+          doorX = canvasW;
+          doorY = Math.round(rel * canvasH);
+        }
+      }
+
       const initialRoomShapes: EditorShape[] = [
         {
           id: `room_boundary_${activeRoomId}`,
           objectTypeId: 'room_boundary',
-          geometryType: 'rectangle' as any,
-          x: 180,
-          y: 120,
-          width: 840,
-          height: 560,
+          geometryType: isPolygon ? 'polygon' : ('rectangle' as any),
+          x: 0,
+          y: 0,
+          width: canvasW,
+          height: canvasH,
           rotation: 0,
           scaleX: 1,
           scaleY: 1,
-          points: [],
-          name: `${rName} Perimeter Walls`,
+          points: roomPoints,
+          name: `${rName || 'Room'} Perimeter Walls`,
           color: '#3b82f6',
           isLocked: true,
           attributes: { isRoomPerimeter: true },
@@ -441,26 +623,49 @@ export const MapEditor: React.FC<MapEditorProps> = ({
           id: `room_door_${activeRoomId}`,
           objectTypeId: 'entrance',
           geometryType: 'point',
-          x: 600,
-          y: 680,
+          x: doorX,
+          y: doorY,
           width: 24,
           height: 24,
           rotation: 0,
           scaleX: 1,
           scaleY: 1,
           points: [],
-          name: `${rName} Entrance Door`,
+          name: `${rName || 'Room'} Entrance Door`,
           color: '#10b981',
           attributes: { isDoor: true, isEntrance: true },
         },
       ];
+
+      // 7. Load or adapt existing room interior shapes
+      if (data) {
+        try {
+          const parsed: EditorShape[] = JSON.parse(data);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            // Keep any interior shapes (cabins, desks, furniture, partitions), but enforce matching boundary & door
+            const interiorItems = parsed.filter(s =>
+              s.id !== `room_boundary_${activeRoomId}` &&
+              s.id !== `room_door_${activeRoomId}` &&
+              !s.attributes?.isRoomPerimeter
+            );
+            const combinedShapes = [...initialRoomShapes, ...interiorItems];
+            clearHistory(combinedShapes);
+            prevShapeCount.current = combinedShapes.length;
+            prevShapesHash.current = JSON.stringify(combinedShapes);
+            setSaveStatus('saved');
+            setFitToViewTrigger(v => v + 1);
+            return;
+          }
+        } catch (e) {}
+      }
+
       clearHistory(initialRoomShapes);
       prevShapeCount.current = initialRoomShapes.length;
       prevShapesHash.current = JSON.stringify(initialRoomShapes);
       setSaveStatus('unsaved');
+      setFitToViewTrigger(v => v + 1);
       return;
     }
-
     if (data) {
       try {
         const parsed = JSON.parse(data);
@@ -478,7 +683,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     if (activeFloorId) {
       const currentFloorObjs = objectStore.getByFloor(activeFloorId);
       if (currentFloorObjs.length > 0) {
-        const pxPerM = calibration.canvasWidthPx / calibration.realWidthMeters;
+        const pxPerM = calibrationRef.current.canvasWidthPx / calibrationRef.current.realWidthMeters;
         const hydratedShapes: EditorShape[] = currentFloorObjs.map((obj: MapObject) => {
           const geomType = obj.geometryType || 'polygon';
           const x = Math.round(obj.coordinates.x * pxPerM);
@@ -525,7 +730,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     prevShapeCount.current = 0;
     prevShapesHash.current = '[]';
     setSaveStatus('saved');
-  }, [getStorageKey, activeFloorId, activeCampusId, propFloorId, activeRoomId, calibration]);
+  }, [getStorageKey, activeFloorId, activeCampusId, propFloorId, activeRoomId]);
 
   // Mark unsaved when shapes change (hash-based, not just count)
   useEffect(() => {
@@ -628,9 +833,43 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       });
     }
 
+    // 4. Auto-generate and sync navigation graph from drawn shapes and paths
+    try {
+      const allBuildingNodes = activeBuildingId ? navStore.getNodesByBuilding(activeBuildingId) : floorNodes;
+      const allCampusConnections = activeCampusId ? navStore.getConnectionsByCampus(activeCampusId) : campusConnections;
+      const res = CampusGraphGenerator.generateGraph(
+        activeCampusId,
+        activeFloorId,
+        activeBuildingId,
+        shapes,
+        allBuildingNodes,
+        allCampusConnections,
+        floorObjects,
+        calibration,
+        {
+          snapToleranceMeters: 0.8,
+          doorSnapToleranceMeters: 8.0,
+          preserveMetadata: true,
+          autoAssociateRooms: true,
+          autoConnectFloorTransitions: true,
+        }
+      );
+      if (res && res.nodes && res.nodes.length > 0) {
+        navStore.setNodesAndConnections(res.nodes, res.connections);
+        res.updatedObjects.forEach(obj => {
+          updateObject(obj.id, {
+            associatedNodeId: obj.associatedNodeId,
+            entranceNodeIds: obj.entranceNodeIds,
+          });
+        });
+      }
+    } catch (graphErr) {
+      console.warn('Auto graph sync on save warning:', graphErr);
+    }
+
     setSaveStatus('saved');
     setLastSaved(new Date());
-  }, [shapes, getStorageKey, updateObject, calibration, activeFloorId, floorPlanUrl, floorOverlay]);
+  }, [shapes, getStorageKey, updateObject, calibration, activeFloorId, floorPlanUrl, floorOverlay, activeBuildingId, activeCampusId, floorNodes, campusConnections, floorObjects]);
 
   // Autosave debounce timer
   useEffect(() => {
@@ -940,17 +1179,18 @@ export const MapEditor: React.FC<MapEditorProps> = ({
 
   // â”€â”€ Element Drop Handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleElementDrop = useCallback((element: import('../../data/map-elements').MapElement, canvasX: number, canvasY: number) => {
-    // 1. Check if dropped on top of an existing building or room shape
-    const targetShape = shapes.find(s => {
+    // 1. In campus/floor mode: Check if dropped on top of an unskinned building/room to skin it.
+    // In room interior mode: NEVER skin room perimeter; always place as an interior element at drop position!
+    const targetShape = (!activeRoomId) ? shapes.find(s => {
+      if (s.isLocked || s.attributes?.isRoomPerimeter || s.objectTypeId === 'room_boundary') return false;
+      if (s.geometryType === 'image') return false;
       const sw = s.width || 20;
       const sh = s.height || 20;
       return canvasX >= s.x && canvasX <= (s.x + sw) &&
              canvasY >= s.y && canvasY <= (s.y + sh);
-    });
+    }) : null;
 
     if (targetShape) {
-      // Adapt directly to the building!
-      // The 2D element skins the building and takes its exact size (covers all space, no extra blue area)
       updateShape(targetShape.id, {
         geometryType: 'image',
         elementKey: element.key,
@@ -971,7 +1211,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
       return;
     }
 
-    // 2. Otherwise, place as a new element shape on the canvas
+    // 2. Place as a new element shape on the canvas right at the cursor position
     const newShape: EditorShape = {
       id: uuidv4(),
       objectTypeId: 'element',
@@ -997,7 +1237,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
     setIsSidebarOpen(true);
     setTool('select');
     setSaveStatus('unsaved');
-  }, [shapes, updateShape, handleShapeFinalized]);
+  }, [activeRoomId, shapes, updateShape, handleShapeFinalized]);
 
   // One-click skinning: when a building shape is selected, clicking any element skins it immediately!
   const handleElementClick = useCallback((element: import('../../data/map-elements').MapElement) => {
@@ -1516,7 +1756,7 @@ export const MapEditor: React.FC<MapEditorProps> = ({
               setSelectedIds={showPreview ? () => {} : setSelectedIds}
               tool={showPreview ? 'select' : tool}
               onToolChange={setTool}
-              gridSize={gridSize}
+              gridSize={activeGridSize}
               isSnapping={isSnapping}
               onCoordinatesChange={setPointerCoords}
               activeType={activeType}

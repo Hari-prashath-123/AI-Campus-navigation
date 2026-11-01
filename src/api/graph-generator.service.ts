@@ -14,6 +14,10 @@ export interface GraphGeneratorOptions {
   autoAssociateRooms?: boolean;
   /** Whether to automatically create vertical transitions between aligned stairs/elevators across floors. Default true */
   autoConnectFloorTransitions?: boolean;
+  /** Whether to connect T-junctions where an endpoint/vertex meets a path segment. Default false */
+  autoConnectTJunctions?: boolean;
+  /** Whether to connect geometrical line crossings into explicit junction nodes. Default false */
+  connectCrossings?: boolean;
 }
 
 export interface GraphGenerationResult {
@@ -56,12 +60,17 @@ export function calculateDistanceMeters(
 export function isWalkablePathShape(shape: EditorShape): boolean {
   if (shape.geometryType === 'polyline') return true;
   if (shape.attributes?.isWalkable === true) return true;
+  if (shape.attributes?.isRoad === true || shape.attributes?.isPath === true) return true;
   const category = (shape.attributes?.category || shape.objectTypeId || '').toLowerCase();
   const name = (shape.name || '').toLowerCase();
-  if (category.includes('corridor') || category.includes('hallway') || category.includes('path') || category.includes('walkway')) {
+  const key = (shape.elementKey || '').toLowerCase();
+  if (category.includes('corridor') || category.includes('hallway') || category.includes('path') || category.includes('walkway') || category.includes('road')) {
     return true;
   }
-  if (name.includes('corridor') || name.includes('hallway') || name.includes('walkway') || name.includes('path')) {
+  if (name.includes('corridor') || name.includes('hallway') || name.includes('walkway') || name.includes('path') || name.includes('road') || name.includes('street') || name.includes('driveway')) {
+    return true;
+  }
+  if (key.startsWith('road') || key.includes('path')) {
     return true;
   }
   return false;
@@ -93,16 +102,21 @@ export class CampusGraphGenerator {
     const pxPerM = calibration.canvasWidthPx / calibration.realWidthMeters;
     const snapTolerancePx = snapToleranceM * pxPerM;
 
-    // Filter relevant existing data
-    const otherFloorNodes = floorId ? existingNodes.filter(n => n.floorId !== floorId) : [];
-    const currentFloorExistingNodes = floorId ? existingNodes.filter(n => n.floorId === floorId) : existingNodes;
+    // Filter relevant existing data safely for both indoor floors and outdoor campus level
+    const isFloor = Boolean(floorId && floorId.trim() !== '');
+    const otherFloorNodes = isFloor
+      ? existingNodes.filter(n => n.floorId !== floorId)
+      : existingNodes.filter(n => Boolean(n.floorId && n.floorId.trim() !== ''));
+    const currentFloorExistingNodes = isFloor
+      ? existingNodes.filter(n => n.floorId === floorId)
+      : existingNodes.filter(n => !n.floorId || n.floorId.trim() === '');
 
-    const otherFloorConnections = floorId
+    const otherFloorConnections = isFloor
       ? existingConnections.filter(c => c.sourceFloorId !== floorId && c.targetFloorId !== floorId)
-      : [];
-    const currentFloorExistingConnections = floorId
+      : existingConnections.filter(c => Boolean(c.sourceFloorId) || Boolean(c.targetFloorId));
+    const currentFloorExistingConnections = isFloor
       ? existingConnections.filter(c => c.sourceFloorId === floorId || c.targetFloorId === floorId)
-      : existingConnections;
+      : existingConnections.filter(c => (!c.sourceFloorId || c.sourceFloorId === '') && (!c.targetFloorId || c.targetFloorId === ''));
 
     // ── STEP 1: Identify Walkable Path Shapes & Extract Vertices ────────────────
     const pathShapes = shapes.filter(s => isWalkablePathShape(s));
@@ -119,7 +133,18 @@ export class CampusGraphGenerator {
     const rawVertices: RawVertex[] = [];
 
     for (const ps of pathShapes) {
-      const pts = ps.points || [ps.x, ps.y, ps.x + (ps.width || 0), ps.y + (ps.height || 0)];
+      let pts: number[];
+      if (ps.geometryType === 'polyline' && ps.points && ps.points.length >= 4) {
+        pts = ps.points;
+      } else {
+        const sx = ps.x || 0, sy = ps.y || 0;
+        const sw = ps.width || 60, sh = ps.height || 40;
+        if (sw >= sh) {
+          pts = [sx, sy + sh / 2, sx + sw / 2, sy + sh / 2, sx + sw, sy + sh / 2];
+        } else {
+          pts = [sx + sw / 2, sy, sx + sw / 2, sy + sh / 2, sx + sw / 2, sy + sh];
+        }
+      }
       const numPoints = Math.floor(pts.length / 2);
       for (let i = 0; i < numPoints; i++) {
         rawVertices.push({
@@ -246,7 +271,18 @@ export class CampusGraphGenerator {
     let edgesPreservedCount = 0;
 
     for (const ps of pathShapes) {
-      const pts = ps.points || [ps.x, ps.y, ps.x + (ps.width || 0), ps.y + (ps.height || 0)];
+      let pts: number[];
+      if (ps.geometryType === 'polyline' && ps.points && ps.points.length >= 4) {
+        pts = ps.points;
+      } else {
+        const sx = ps.x || 0, sy = ps.y || 0;
+        const sw = ps.width || 60, sh = ps.height || 40;
+        if (sw >= sh) {
+          pts = [sx, sy + sh / 2, sx + sw / 2, sy + sh / 2, sx + sw, sy + sh / 2];
+        } else {
+          pts = [sx + sw / 2, sy, sx + sw / 2, sy + sh / 2, sx + sw / 2, sy + sh];
+        }
+      }
       const numPoints = Math.floor(pts.length / 2);
       const isBidi = ps.attributes?.isBidirectional ?? (ps.attributes?.isOneWay ? false : true);
       const isRestricted = ps.attributes?.isRestricted ?? false;
@@ -311,6 +347,200 @@ export class CampusGraphGenerator {
               });
               edgesCreatedCount++;
             }
+          }
+        }
+      }
+    }
+
+    // ── STEP 3B: Connect T-Junctions & Intersections (when enabled) ─────────────
+    if (options.autoConnectTJunctions || options.connectCrossings) {
+      // 1. T-Junctions: Check if any clustered node lies close to an edge segment, and split the edge
+      let splitHappened = true;
+      let iterations = 0;
+      while (splitHappened && iterations < 5) {
+        splitHappened = false;
+        iterations++;
+        for (const cn of clusteredNodes) {
+          for (let eIdx = 0; eIdx < generatedConnections.length; eIdx++) {
+            const edge = generatedConnections[eIdx];
+            if (edge.sourceNodeId === cn.id || edge.targetNodeId === cn.id) continue;
+            const sn = nodeLookup.get(edge.sourceNodeId);
+            const tn = nodeLookup.get(edge.targetNodeId);
+            if (!sn || !tn) continue;
+
+            const dx = tn.coordinates.x - sn.coordinates.x;
+            const dy = tn.coordinates.y - sn.coordinates.y;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0) continue;
+
+            const t = ((cn.x - sn.coordinates.x) * dx + (cn.y - sn.coordinates.y) * dy) / lenSq;
+            if (t > 0.05 && t < 0.95) {
+              const projX = sn.coordinates.x + t * dx;
+              const projY = sn.coordinates.y + t * dy;
+              const distToEdgePx = Math.hypot(cn.x - projX, cn.y - projY);
+
+              if (distToEdgePx <= Math.max(snapTolerancePx, 60)) {
+                generatedConnections.splice(eIdx, 1);
+                const now = new Date().toISOString();
+                const d1 = calculateDistanceMeters(sn.coordinates.x, sn.coordinates.y, cn.x, cn.y, calibration);
+                const d2 = calculateDistanceMeters(cn.x, cn.y, tn.coordinates.x, tn.coordinates.y, calibration);
+
+                generatedConnections.push({
+                  ...edge,
+                  id: uuidv4(),
+                  sourceNodeId: sn.id,
+                  targetNodeId: cn.id,
+                  distanceMeters: d1,
+                  createdAt: now,
+                  updatedAt: now,
+                });
+                generatedConnections.push({
+                  ...edge,
+                  id: uuidv4(),
+                  sourceNodeId: cn.id,
+                  targetNodeId: tn.id,
+                  distanceMeters: d2,
+                  createdAt: now,
+                  updatedAt: now,
+                });
+                edgePairsKey.add(getEdgeKey(sn.id, cn.id));
+                edgePairsKey.add(getEdgeKey(cn.id, tn.id));
+                splitHappened = true;
+                break;
+              }
+            } else {
+              // Endpoint near end of another line
+              const targetN = t <= 0.05 ? sn : tn;
+              const dToN = Math.hypot(cn.x - targetN.coordinates.x, cn.y - targetN.coordinates.y);
+              if (dToN <= Math.max(snapTolerancePx, 60) && cn.id !== targetN.id) {
+                const pairKey = getEdgeKey(cn.id, targetN.id);
+                if (!edgePairsKey.has(pairKey)) {
+                  edgePairsKey.add(pairKey);
+                  const now = new Date().toISOString();
+                  generatedConnections.push({
+                    ...edge,
+                    id: uuidv4(),
+                    sourceNodeId: cn.id,
+                    targetNodeId: targetN.id,
+                    distanceMeters: calculateDistanceMeters(cn.x, cn.y, targetN.coordinates.x, targetN.coordinates.y, calibration),
+                    createdAt: now,
+                    updatedAt: now,
+                  });
+                }
+              }
+            }
+          }
+          if (splitHappened) break;
+        }
+      }
+
+      // Connect any nearby endpoints of different paths that terminate within 60px of each other
+      for (let i = 0; i < clusteredNodes.length; i++) {
+        const n1 = clusteredNodes[i];
+        for (let j = i + 1; j < clusteredNodes.length; j++) {
+          const n2 = clusteredNodes[j];
+          const d = Math.hypot(n1.x - n2.x, n1.y - n2.y);
+          if (d <= Math.max(snapTolerancePx, 60)) {
+            const pairKey = getEdgeKey(n1.id, n2.id);
+            if (!edgePairsKey.has(pairKey)) {
+              edgePairsKey.add(pairKey);
+              const now = new Date().toISOString();
+              generatedConnections.push({
+                id: uuidv4(),
+                campusId,
+                sourceNodeId: n1.id,
+                sourceBuildingId: buildingId,
+                sourceFloorId: floorId,
+                targetNodeId: n2.id,
+                targetBuildingId: buildingId,
+                targetFloorId: floorId,
+                connectionType: 'corridor',
+                name: 'Junction Link',
+                isBidirectional: true,
+                isAccessible: true,
+                isWalkable: true,
+                isVehicleAccessible: false,
+                distanceMeters: calculateDistanceMeters(n1.x, n1.y, n2.x, n2.y, calibration),
+                weightMultiplier: 1.0,
+                createdAt: now,
+                updatedAt: now,
+              });
+            }
+          }
+        }
+      }
+
+      // 2. Cross-intersections
+      if (options.connectCrossings) {
+        let crossSplitHappened = true;
+        let crossIters = 0;
+        while (crossSplitHappened && crossIters < 5) {
+          crossSplitHappened = false;
+          crossIters++;
+          for (let i = 0; i < generatedConnections.length; i++) {
+            const e1 = generatedConnections[i];
+            const p1 = nodeLookup.get(e1.sourceNodeId)?.coordinates;
+            const p2 = nodeLookup.get(e1.targetNodeId)?.coordinates;
+            if (!p1 || !p2) continue;
+
+            for (let j = i + 1; j < generatedConnections.length; j++) {
+              const e2 = generatedConnections[j];
+              const p3 = nodeLookup.get(e2.sourceNodeId)?.coordinates;
+              const p4 = nodeLookup.get(e2.targetNodeId)?.coordinates;
+              if (!p3 || !p4) continue;
+
+              if (e1.sourceNodeId === e2.sourceNodeId || e1.sourceNodeId === e2.targetNodeId ||
+                  e1.targetNodeId === e2.sourceNodeId || e1.targetNodeId === e2.targetNodeId) continue;
+
+              const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+              if (Math.abs(d) < 1e-6) continue;
+
+              const t1 = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+              const t2 = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+
+              if (t1 > 0.05 && t1 < 0.95 && t2 > 0.05 && t2 < 0.95) {
+                const ix = Math.round(p1.x + t1 * (p2.x - p1.x));
+                const iy = Math.round(p1.y + t1 * (p2.y - p1.y));
+                const jNodeId = uuidv4();
+                const jNode: SpatialNode = {
+                  id: jNodeId,
+                  campusId,
+                  buildingId,
+                  floorId,
+                  type: 'hallway',
+                  coordinates: { x: ix, y: iy },
+                  isAccessible: true,
+                  label: `Crossing (${ix}, ${iy})`,
+                };
+                generatedFloorNodes.push(jNode);
+                nodeLookup.set(jNodeId, jNode);
+
+                generatedConnections.splice(j, 1);
+                generatedConnections.splice(i, 1);
+                const now = new Date().toISOString();
+
+                generatedConnections.push({
+                  ...e1, id: uuidv4(), sourceNodeId: e1.sourceNodeId, targetNodeId: jNodeId,
+                  distanceMeters: calculateDistanceMeters(p1.x, p1.y, ix, iy, calibration), createdAt: now, updatedAt: now,
+                });
+                generatedConnections.push({
+                  ...e1, id: uuidv4(), sourceNodeId: jNodeId, targetNodeId: e1.targetNodeId,
+                  distanceMeters: calculateDistanceMeters(ix, iy, p2.x, p2.y, calibration), createdAt: now, updatedAt: now,
+                });
+                generatedConnections.push({
+                  ...e2, id: uuidv4(), sourceNodeId: e2.sourceNodeId, targetNodeId: jNodeId,
+                  distanceMeters: calculateDistanceMeters(p3.x, p3.y, ix, iy, calibration), createdAt: now, updatedAt: now,
+                });
+                generatedConnections.push({
+                  ...e2, id: uuidv4(), sourceNodeId: jNodeId, targetNodeId: e2.targetNodeId,
+                  distanceMeters: calculateDistanceMeters(ix, iy, p4.x, p4.y, calibration), createdAt: now, updatedAt: now,
+                });
+
+                crossSplitHappened = true;
+                break;
+              }
+            }
+            if (crossSplitHappened) break;
           }
         }
       }

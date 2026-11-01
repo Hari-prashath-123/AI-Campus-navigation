@@ -11,12 +11,20 @@ import {
   Navigation, User, Car, MapPin, Layers, Bot, ArrowUpDown,
   Search, X, Check, AlertCircle, CornerUpLeft, CornerUpRight,
   ArrowUp, Compass, ChevronRight, Building2,
-  Clock, Footprints, ArrowLeft, LogOut,
+  Clock, Footprints, ArrowLeft, LogOut, Crosshair, ChevronDown,
 } from 'lucide-react';
 import { AIAssistantPage } from './AIAssistantPage';
 
 // ─── View level type ──────────────────────────────────────────────────────────
 type ViewLevel = 'campus' | 'building' | 'floor' | 'room';
+
+interface PinLocation {
+  x: number;
+  y: number;
+  level: ViewLevel;
+  floorId?: string;
+  roomId?: string;
+}
 
 interface ViewState {
   level: ViewLevel;
@@ -44,6 +52,11 @@ export const UserNavigationPage: React.FC = () => {
   const [floorPickerOpen, setFloorPickerOpen] = useState(false);
   const [floorPickerContext, setFloorPickerContext] = useState<{ label: string; shape: EditorShape } | null>(null);
 
+  // ─── Pick on Map state ─────────────────────────────────────────────────────
+  const [pickMode, setPickMode] = useState<'start' | 'dest' | null>(null);
+  // Dropdown scope tab: 'current' | 'all'
+  const [dropdownScope, setDropdownScope] = useState<'current' | 'all'>('current');
+
   const [sourceQuery, setSourceQuery] = useState('');
   const [destQuery, setDestQuery] = useState('');
   const [sourceObj, setSourceObj] = useState<MapObject | null>(null);
@@ -58,6 +71,82 @@ export const UserNavigationPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'nav' | 'ai'>('nav');
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(true);
 
+  const [sourcePinPos, setSourcePinPos] = useState<PinLocation | null>(null);
+  const [destPinPos, setDestPinPos] = useState<PinLocation | null>(null);
+
+  // ─── Lookups ────────────────────────────────────────────────────────────────
+  const buildingMap = useMemo(() => new Map(buildings.map(b => [b.id, b])), [buildings]);
+  const floorMap = useMemo(() => new Map(floors.map(f => [f.id, f])), [floors]);
+
+  // Floor-plan coordinates cannot be drawn directly on the campus plan.  Resolve
+  // indoor locations to their own building shape, using stable IDs first.  In
+  // particular, avoid substring matching here: names such as "Machine Lab" and
+  // "Mechanical Lab" must never share a campus pin.
+  const getCampusBuildingAnchor = (obj: MapObject | null): { x: number; y: number } | undefined => {
+    if (!obj) return undefined;
+    const buildingId = obj.buildingId || (obj.floorId ? floorMap.get(obj.floorId)?.buildingId : undefined);
+    if (!buildingId) return undefined;
+
+    const building = buildingMap.get(buildingId);
+    const buildingName = (building ? (typeof building.name === 'string' ? building.name : building.name?.en || '') : '').trim().toLowerCase();
+    const buildingShape = editorShapes.find(shape =>
+      shape.objectId === buildingId ||
+      shape.id === buildingId ||
+      shape.attributes?.buildingId === buildingId ||
+      // Names are only a legacy fallback when they match exactly.
+      Boolean(buildingName && shape.name?.trim().toLowerCase() === buildingName)
+    );
+
+    if (!buildingShape) return undefined;
+    return {
+      x: Math.round(buildingShape.x + (buildingShape.width || 120) / 2),
+      y: Math.round(buildingShape.y + (buildingShape.height || 100)),
+    };
+  };
+
+  // ─── Visible pins matching the current active view ─────────────────────────
+  const visibleSourcePin = useMemo(() => {
+    if (!sourcePinPos && !sourceObj) return undefined;
+    if (view.level === 'campus') {
+      if (sourcePinPos?.level === 'campus') return { x: sourcePinPos.x, y: sourcePinPos.y };
+      if (sourceObj && !sourceObj.floorId && sourceObj.coordinates && (sourceObj.coordinates.x > 0 || sourceObj.coordinates.y > 0)) {
+        return sourceObj.coordinates;
+      }
+      return getCampusBuildingAnchor(sourceObj);
+    }
+    if (view.level === 'floor') {
+      if (sourcePinPos?.level === 'floor' && view.floorId === sourcePinPos.floorId) return { x: sourcePinPos.x, y: sourcePinPos.y };
+      if (sourceObj && sourceObj.floorId === view.floorId && sourceObj.coordinates) return sourceObj.coordinates;
+      return undefined;
+    }
+    if (view.level === 'room') {
+      if (sourcePinPos?.level === 'room' && view.roomId === sourcePinPos.roomId) return { x: sourcePinPos.x, y: sourcePinPos.y };
+      return undefined;
+    }
+    return undefined;
+  }, [sourcePinPos, sourceObj, view, editorShapes, floorMap, buildingMap]);
+
+  const visibleDestPin = useMemo(() => {
+    if (!destPinPos && !destObj) return undefined;
+    if (view.level === 'campus') {
+      if (destPinPos?.level === 'campus') return { x: destPinPos.x, y: destPinPos.y };
+      if (destObj && !destObj.floorId && destObj.coordinates && (destObj.coordinates.x > 0 || destObj.coordinates.y > 0)) {
+        return destObj.coordinates;
+      }
+      return getCampusBuildingAnchor(destObj);
+    }
+    if (view.level === 'floor') {
+      if (destPinPos?.level === 'floor' && view.floorId === destPinPos.floorId) return { x: destPinPos.x, y: destPinPos.y };
+      if (destObj && destObj.floorId === view.floorId && destObj.coordinates) return destObj.coordinates;
+      return undefined;
+    }
+    if (view.level === 'room') {
+      if (destPinPos?.level === 'room' && view.roomId === destPinPos.roomId) return { x: destPinPos.x, y: destPinPos.y };
+      return undefined;
+    }
+    return undefined;
+  }, [destPinPos, destObj, view, editorShapes, floorMap, buildingMap]);
+
   // ─── Derive currentFloorId from view ───────────────────────────────────────
   const currentFloorId = view.floorId || '';
 
@@ -68,11 +157,109 @@ export const UserNavigationPage: React.FC = () => {
     let shapes: EditorShape[] = [];
 
     if (view.level === 'room' && view.roomId && view.floorId && view.buildingId) {
-      // Room interior: load room-specific shapes
+      // Room interior: check direct room storage key
       const roomKey = `editor-shapes-${view.campusId}-${view.buildingId}-${view.floorId}-${view.roomId}`;
       const raw = localStorage.getItem(roomKey);
       if (raw) {
-        try { shapes = JSON.parse(raw); } catch (e) {}
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) shapes = parsed;
+        } catch (e) {}
+      }
+
+      // Check alternate keys ending with roomId
+      if (shapes.length === 0) {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith('editor-shapes-') && k.endsWith(`-${view.roomId}`)) {
+            try {
+              const parsed = JSON.parse(localStorage.getItem(k) || '[]');
+              if (Array.isArray(parsed) && parsed.length > 0) { shapes = parsed; break; }
+            } catch (e) {}
+          }
+        }
+      }
+
+      // Fallback: synthesize boundary from floor shapes so the room layout always renders correctly
+      if (shapes.length === 0) {
+        let floorShapes: EditorShape[] = [];
+        const floorKey = `editor-shapes-${view.campusId}-${view.buildingId}-${view.floorId}`;
+        const rawFloor = localStorage.getItem(floorKey);
+        if (rawFloor) {
+          try { floorShapes = JSON.parse(rawFloor); } catch (e) {}
+        }
+        if (floorShapes.length === 0) {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith('editor-shapes-') && k.includes(view.floorId) && !k.endsWith(view.roomId)) {
+              try {
+                const arr = JSON.parse(localStorage.getItem(k) || '[]');
+                if (Array.isArray(arr) && arr.length > 0) { floorShapes = arr; break; }
+              } catch (e) {}
+            }
+          }
+        }
+
+        const roomObj = objectStore.getById(view.roomId);
+        const rName = (roomObj ? (typeof roomObj.name === 'string' ? roomObj.name : roomObj.name?.en) : '') || '';
+        const rCode = roomObj?.code || '';
+
+        const floorRoomShape = floorShapes.find(s => {
+          if (s.objectId === view.roomId || s.id === view.roomId || s.id === `shape_${view.roomId}`) return true;
+          const sName = (s.name || '').toLowerCase().trim();
+          if (rName && sName === rName.toLowerCase().trim()) return true;
+          if (rCode && sName === rCode.toLowerCase().trim()) return true;
+          if (rName && (sName.includes(rName.toLowerCase().trim()) || rName.toLowerCase().trim().includes(sName))) return true;
+          return false;
+        });
+
+        const fw = floorRoomShape?.width || 240;
+        const fh = floorRoomShape?.height || 160;
+        let canvasW = 1200;
+        let canvasH = 960;
+        if (fw <= fh) {
+          canvasH = 1000;
+          canvasW = Math.max(240, Math.round(1000 * (fw / fh)));
+        } else {
+          canvasW = 1200;
+          canvasH = Math.max(240, Math.round(1200 * (fh / fw)));
+        }
+
+        shapes = [
+          {
+            id: `room_boundary_${view.roomId}`,
+            objectTypeId: 'room_boundary',
+            geometryType: 'rectangle' as any,
+            x: 0,
+            y: 0,
+            width: canvasW,
+            height: canvasH,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            points: [],
+            name: `${rName || 'Room'} Layout`,
+            color: '#3b82f6',
+            isLocked: true,
+            attributes: { isRoomPerimeter: true },
+          },
+          {
+            id: `room_door_${view.roomId}`,
+            objectTypeId: 'entrance',
+            geometryType: 'point',
+            x: Math.round(canvasW / 2),
+            y: canvasH,
+            width: 24,
+            height: 24,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            points: [],
+            name: `${rName || 'Room'} Entrance Door`,
+            color: '#10b981',
+            attributes: { isDoor: true, isEntrance: true },
+          }
+        ];
       }
     } else if (view.level === 'floor' && view.floorId && view.buildingId) {
       // Floor map: search for floor-specific storage key
@@ -131,19 +318,27 @@ export const UserNavigationPage: React.FC = () => {
     setView({ level: 'campus', campusId: selectedCampus });
   }, [selectedCampus]);
 
-  // ─── Lookups ────────────────────────────────────────────────────────────────
-  const buildingMap = useMemo(() => new Map(buildings.map(b => [b.id, b])), [buildings]);
-  const floorMap = useMemo(() => new Map(floors.map(f => [f.id, f])), [floors]);
 
   // ─── Drill-down navigation handlers ────────────────────────────────────────
   const enterBuilding = useCallback((buildingId: string) => {
     // Find ground floor (level 0 or lowest level)
-    const bldFloors = floors.filter(f => f.buildingId === buildingId)
-      .sort((a, b) => a.level - b.level);
-    const groundFloor = bldFloors[0];
+    let bldFloors = floors.filter(f => f.buildingId === buildingId).sort((a, b) => a.level - b.level);
+    if (bldFloors.length === 0) {
+      // Try matching by building name
+      const bldObj = buildings.find(b => b.id === buildingId || (typeof b.name === 'string' ? b.name : b.name?.en) === buildingId);
+      if (bldObj) {
+        bldFloors = floors.filter(f => f.buildingId === bldObj.id).sort((a, b) => a.level - b.level);
+      }
+    }
+    const groundFloor = bldFloors[0] || floors[0];
     if (!groundFloor) return;
-    setView({ level: 'floor', campusId: selectedCampus, buildingId, floorId: groundFloor.id });
-  }, [floors, selectedCampus]);
+    setView({
+      level: 'floor',
+      campusId: selectedCampus,
+      buildingId: groundFloor.buildingId || buildingId,
+      floorId: groundFloor.id
+    });
+  }, [floors, buildings, selectedCampus]);
 
   const enterFloor = useCallback((floorId: string, buildingId: string) => {
     setView({ level: 'floor', campusId: selectedCampus, buildingId, floorId });
@@ -197,7 +392,7 @@ export const UserNavigationPage: React.FC = () => {
     }
 
     // 2. Building click on Campus Map → enter building ground floor
-    if (view.level === 'campus') {
+    if (view.level === 'campus' || view.level === 'building') {
       let bldId = shape.attributes?.buildingId || shape.objectId;
       if (!bldId) {
         const matched = buildings.find(b => {
@@ -275,7 +470,7 @@ export const UserNavigationPage: React.FC = () => {
     if (campus) crumbs.push({ label: typeof campus.name === 'string' ? campus.name : campus.name.en, action: exitToOutdoor });
     if (view.buildingId) {
       const bld = buildingMap.get(view.buildingId);
-      crumbs.push({ label: bld?.name.en || 'Building', action: view.level !== 'building' ? () => setView({ level: 'building', campusId: view.campusId, buildingId: view.buildingId }) : undefined });
+      crumbs.push({ label: bld?.name.en || 'Building', action: () => enterBuilding(view.buildingId!) });
     }
     if (view.floorId) {
       const flr = floorMap.get(view.floorId);
@@ -288,24 +483,96 @@ export const UserNavigationPage: React.FC = () => {
     return crumbs;
   }, [campuses, selectedCampus, view, buildingMap, floorMap, exitToOutdoor]);
 
-  // ─── Search filtering ───────────────────────────────────────────────────────
-  const sourceMatches = useMemo(() => {
-    if (!sourceQuery.trim() || sourceObj) return [];
-    const q = sourceQuery.toLowerCase().trim();
+  // ─── Clean Navigable Destinations Filter ────────────────────────────────────
+  // Filter out noise elements like raw navigation paths, wall lines, corridors, compound walls
+  const cleanDestinations = useMemo(() => {
     return objects.filter(o => {
+      const name = (typeof o.name === 'string' ? o.name : o.name?.en || '').toLowerCase().trim();
+      if (!name) return false;
+      if (
+        name.includes('navigation path') || name.includes('nav path') ||
+        name.includes('compound wall') || name.includes('wall line') ||
+        name.includes('vertical wall') || name.includes('horizontal wall') ||
+        name.includes('corridor') || name.includes('asphalt') ||
+        name.includes('boundary') || name.includes('perimeter')
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [objects]);
+
+  // Context-filtered items based on current map view level
+  const contextDestinations = useMemo(() => {
+    if (dropdownScope === 'all') {
+      return cleanDestinations;
+    }
+    if (view.level === 'campus') {
+      // In Campus view: Show buildings, parking, main gates, outdoor landmarks
+      const campusObjs = cleanDestinations.filter(o => !o.floorId || o.category === 'entrance' || o.category === 'landmark');
+      // Also synthesize building destinations from buildings list if not in objects
+      const now = new Date().toISOString();
+      const bldDestinations: MapObject[] = buildings.map(b => ({
+        id: b.id,
+        campusId: selectedCampus,
+        name: b.name,
+        code: b.code,
+        category: 'building' as any,
+        coordinates: (() => {
+          const bName = (typeof b.name === 'string' ? b.name : b.name?.en || '').toLowerCase().trim();
+          const bShape = editorShapes.find(s =>
+            s.objectId === b.id || s.id === b.id ||
+            (s.name && (s.name.toLowerCase().trim() === bName || s.name.toLowerCase().includes(bName) || bName.includes(s.name.toLowerCase().trim())))
+          );
+          return bShape
+            ? { x: Math.round(bShape.x + (bShape.width || 120) / 2), y: Math.round(bShape.y + (bShape.height || 100) / 2) }
+            : { x: 400, y: 400 };
+        })(),
+        buildingId: b.id,
+        floorId: '',
+        objectTypeId: 'building',
+        associatedNodeId: '',
+        isAccessible: true,
+        createdAt: now,
+        updatedAt: now,
+      }));
+      // Merge unique by name/id
+      const set = new Set(campusObjs.map(o => (typeof o.name === 'string' ? o.name : o.name?.en || '').toLowerCase()));
+      const merged = [...campusObjs];
+      for (const b of bldDestinations) {
+        const bName = (typeof b.name === 'string' ? b.name : b.name?.en || '').toLowerCase();
+        if (!set.has(bName)) {
+          merged.push(b);
+          set.add(bName);
+        }
+      }
+      return merged;
+    } else if (view.level === 'floor' || view.level === 'room') {
+      // In Floor or Room view: Show rooms, labs, cabins on this floor
+      return cleanDestinations.filter(o => o.floorId === view.floorId);
+    }
+    return cleanDestinations;
+  }, [cleanDestinations, dropdownScope, view, buildings, editorShapes]);
+
+  const sourceMatches = useMemo(() => {
+    const list = contextDestinations;
+    if (!sourceQuery.trim()) return list.slice(0, 15);
+    const q = sourceQuery.toLowerCase().trim();
+    return list.filter(o => {
       const name = (typeof o.name === 'string' ? o.name : o.name?.en || '').toLowerCase();
-      return name.includes(q) || (o.code || '').toLowerCase().includes(q);
-    }).slice(0, 8);
-  }, [objects, sourceQuery, sourceObj]);
+      return name.includes(q) || (o.code || '').toLowerCase().includes(q) || o.category.includes(q);
+    }).slice(0, 15);
+  }, [contextDestinations, sourceQuery]);
 
   const destMatches = useMemo(() => {
-    if (!destQuery.trim() || destObj) return [];
+    const list = contextDestinations;
+    if (!destQuery.trim()) return list.slice(0, 15);
     const q = destQuery.toLowerCase().trim();
-    return objects.filter(o => {
+    return list.filter(o => {
       const name = (typeof o.name === 'string' ? o.name : o.name?.en || '').toLowerCase();
-      return name.includes(q) || (o.code || '').toLowerCase().includes(q);
-    }).slice(0, 8);
-  }, [objects, destQuery, destObj]);
+      return name.includes(q) || (o.code || '').toLowerCase().includes(q) || o.category.includes(q);
+    }).slice(0, 15);
+  }, [contextDestinations, destQuery]);
 
   // ─── Route calculation ──────────────────────────────────────────────────────
   const calculateRoute = useCallback(async (
@@ -321,6 +588,8 @@ export const UserNavigationPage: React.FC = () => {
       });
       if (res.success && res.data?.success) {
         setRoute(res.data);
+        setNodes(navStore.getNodesByCampus(selectedCampus));
+        setConnections(navStore.getConnectionsByCampus(selectedCampus));
         if (start.floorId) {
           const flr = floorMap.get(start.floorId);
           if (flr) enterFloor(start.floorId, start.buildingId || '');
@@ -340,17 +609,207 @@ export const UserNavigationPage: React.FC = () => {
   }, [sourceObj, destObj, mode, accessible, calculateRoute]);
 
   const selectSource = (obj: MapObject) => {
+    // Upsert into objects so MapViewer can find and render the pin
+    objectStore.create(obj);
+    setObjects(prev => [...prev.filter(o => o.id !== obj.id), obj]);
+    // Set pin position if coordinates are valid canvas coords
+    if (obj.coordinates && (obj.coordinates.x > 0 || obj.coordinates.y > 0)) {
+      const pinLevel = obj.floorId ? 'floor' : 'campus';
+      setSourcePinPos({ x: obj.coordinates.x, y: obj.coordinates.y, level: pinLevel as any, floorId: obj.floorId || undefined });
+    }
     setSourceObj(obj);
     setSourceQuery(typeof obj.name === 'string' ? obj.name : obj.name?.en || obj.code);
     setIsSearchingSource(false);
+    setPickMode(null);
   };
   const selectDest = (obj: MapObject) => {
+    // Upsert into objects so MapViewer can find and render the pin
+    objectStore.create(obj);
+    setObjects(prev => [...prev.filter(o => o.id !== obj.id), obj]);
+    // Set pin position if coordinates are valid canvas coords
+    if (obj.coordinates && (obj.coordinates.x > 0 || obj.coordinates.y > 0)) {
+      const pinLevel = obj.floorId ? 'floor' : 'campus';
+      setDestPinPos({ x: obj.coordinates.x, y: obj.coordinates.y, level: pinLevel as any, floorId: obj.floorId || undefined });
+    }
     setDestObj(obj);
     setDestQuery(typeof obj.name === 'string' ? obj.name : obj.name?.en || obj.code);
     setIsSearchingDest(false);
+    setPickMode(null);
   };
-  const clearSource = () => { setSourceObj(null); setSourceQuery(''); setRoute(null); setError(''); };
-  const clearDest = () => { setDestObj(null); setDestQuery(''); setRoute(null); setError(''); };
+
+  // Handler when user picks a point or shape on the map
+  const handleCanvasPick = useCallback((coords: { x: number; y: number }, clickedShape?: EditorShape, clickedObj?: MapObject) => {
+    if (!pickMode) return;
+
+    let targetObj: MapObject | null = clickedObj || null;
+
+    if (!targetObj && clickedShape) {
+      // Only match named objects if the shape is NOT a polyline road/path (to avoid matching outdoor "Navigation Path" objects)
+      const isPolylineShape = clickedShape.geometryType === 'polyline';
+      const shapeName = (clickedShape.name || '').toLowerCase().trim();
+
+      if (!isPolylineShape) {
+        // Match objects strictly within the same floor/level context
+        targetObj = objects.find(o => {
+          // Level filter: campus view → outdoor objects only; floor view → same floor only
+          if (view.level === 'campus') {
+            if (o.floorId && o.floorId !== '') return false;
+          } else if (view.level === 'floor' || view.level === 'room') {
+            if (!view.floorId || o.floorId !== view.floorId) return false;
+          }
+          return (
+            o.id === clickedShape.objectId ||
+            o.id === clickedShape.id ||
+            (o.name && (typeof o.name === 'string' ? o.name : o.name.en).toLowerCase() === shapeName)
+          );
+        }) || null;
+      }
+
+      if (!targetObj) {
+        // If clicked on building on campus map
+        if (view.level === 'campus') {
+          const matchedBld = buildings.find(b => {
+            const bName = (typeof b.name === 'string' ? b.name : b.name?.en || '').toLowerCase();
+            return b.id === clickedShape.objectId || (shapeName && shapeName.includes(bName));
+          });
+
+          if (matchedBld) {
+            const now = new Date().toISOString();
+            targetObj = {
+              id: matchedBld.id,
+              campusId: selectedCampus,
+              name: matchedBld.name,
+              code: matchedBld.code,
+              category: 'building' as any,
+              coordinates: coords,
+              buildingId: matchedBld.id,
+              floorId: '',
+              objectTypeId: 'building',
+              associatedNodeId: '',
+              isAccessible: true,
+              createdAt: now,
+              updatedAt: now,
+            };
+          }
+        } else {
+          // Room / POI shape on floor map - create a location point
+          const now = new Date().toISOString();
+          targetObj = {
+            id: clickedShape.objectId || clickedShape.id,
+            campusId: selectedCampus,
+            name: { en: clickedShape.name || 'Selected Location' },
+            code: 'MAP-LOC',
+            category: 'room' as any,
+            coordinates: coords,
+            buildingId: view.buildingId || '',
+            floorId: view.floorId || '',
+            objectTypeId: 'room',
+            associatedNodeId: '',
+            isAccessible: true,
+            createdAt: now,
+            updatedAt: now,
+          };
+        }
+      }
+    }
+
+    if (!targetObj) {
+      // Free point on canvas
+      const now = new Date().toISOString();
+      targetObj = {
+        id: `loc_${coords.x}_${coords.y}`,
+        campusId: selectedCampus,
+        name: { en: `Location (${coords.x}, ${coords.y})` },
+        code: 'PIN',
+        category: 'landmark' as any,
+        coordinates: coords,
+        buildingId: view.buildingId || '',
+        floorId: view.floorId || '',
+        objectTypeId: 'point',
+        associatedNodeId: '',
+        isAccessible: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+
+    if (targetObj) {
+      // Ensure coordinates match user click exactly
+      targetObj = { ...targetObj, coordinates: coords };
+      // Find nearest spatial node on this floor/campus to guarantee valid routing
+      if (!targetObj.associatedNodeId) {
+        const sameFloorNodes = nodes.filter(n => (!targetObj?.floorId || n.floorId === targetObj?.floorId));
+        const cands = sameFloorNodes.length > 0 ? sameFloorNodes : nodes;
+        let closestNode = cands[0];
+        let minDist = Infinity;
+        for (const n of cands) {
+          if (!n.coordinates) continue;
+          const d = Math.hypot(n.coordinates.x - coords.x, n.coordinates.y - coords.y);
+          if (d < minDist) {
+            minDist = d;
+            closestNode = n;
+          }
+        }
+        if (closestNode) {
+          targetObj.associatedNodeId = closestNode.id;
+        }
+      }
+
+      // Upsert into objectStore so routing engine and search recognize it
+      objectStore.create(targetObj);
+      setObjects(prev => [...prev.filter(o => o.id !== targetObj?.id), targetObj!]);
+
+      if (pickMode === 'start') {
+        setSourcePinPos({ x: coords.x, y: coords.y, level: view.level, floorId: view.floorId, roomId: view.roomId });
+        selectSource(targetObj);
+      } else {
+        setDestPinPos({ x: coords.x, y: coords.y, level: view.level, floorId: view.floorId, roomId: view.roomId });
+        selectDest(targetObj);
+      }
+    }
+  }, [pickMode, objects, buildings, view]);
+  const handlePinDrag = (which: 'source' | 'dest', newCanvasCoords: { x: number; y: number }) => {
+    if (which === 'source') {
+      setSourcePinPos(prev => prev ? { ...prev, x: newCanvasCoords.x, y: newCanvasCoords.y } : { x: newCanvasCoords.x, y: newCanvasCoords.y, level: view.level, floorId: view.floorId, roomId: view.roomId });
+      if (sourceObj) {
+        const updated = { ...sourceObj, coordinates: newCanvasCoords };
+        // Find nearest node
+        const cands = nodes.filter(n => !sourceObj.floorId || n.floorId === sourceObj.floorId);
+        const pool = cands.length > 0 ? cands : nodes;
+        let closest = pool[0];
+        let minD = Infinity;
+        for (const n of pool) {
+          if (!n.coordinates) continue;
+          const d = Math.hypot(n.coordinates.x - newCanvasCoords.x, n.coordinates.y - newCanvasCoords.y);
+          if (d < minD) { minD = d; closest = n; }
+        }
+        if (closest) updated.associatedNodeId = closest.id;
+        setSourceObj(updated);
+        objectStore.create(updated);
+        setObjects(prev => [...prev.filter(o => o.id !== updated.id), updated]);
+      }
+    } else {
+      setDestPinPos(prev => prev ? { ...prev, x: newCanvasCoords.x, y: newCanvasCoords.y } : { x: newCanvasCoords.x, y: newCanvasCoords.y, level: view.level, floorId: view.floorId, roomId: view.roomId });
+      if (destObj) {
+        const updated = { ...destObj, coordinates: newCanvasCoords };
+        const cands = nodes.filter(n => !destObj.floorId || n.floorId === destObj.floorId);
+        const pool = cands.length > 0 ? cands : nodes;
+        let closest = pool[0];
+        let minD = Infinity;
+        for (const n of pool) {
+          if (!n.coordinates) continue;
+          const d = Math.hypot(n.coordinates.x - newCanvasCoords.x, n.coordinates.y - newCanvasCoords.y);
+          if (d < minD) { minD = d; closest = n; }
+        }
+        if (closest) updated.associatedNodeId = closest.id;
+        setDestObj(updated);
+        objectStore.create(updated);
+        setObjects(prev => [...prev.filter(o => o.id !== updated.id), updated]);
+      }
+    }
+  };
+    const clearSource = () => { setSourceObj(null); setSourceQuery(''); setSourcePinPos(null); setRoute(null); setError(''); };
+  const clearDest = () => { setDestObj(null); setDestQuery(''); setDestPinPos(null); setRoute(null); setError(''); };
   const swapEndpoints = () => {
     const [ps, psq] = [sourceObj, sourceQuery];
     setSourceObj(destObj); setSourceQuery(destQuery);
@@ -447,62 +906,128 @@ export const UserNavigationPage: React.FC = () => {
 
               {/* Start */}
               <div className="relative">
-                <div className="flex items-center bg-white border border-slate-200 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 pr-2">
-                  <div className="w-9 flex items-center justify-center text-emerald-600 shrink-0"><MapPin size={16} /></div>
-                  <input
-                    type="text" placeholder="Search start point, room, entrance..."
-                    value={sourceQuery}
-                    onChange={(e) => { setSourceQuery(e.target.value); if (sourceObj) setSourceObj(null); setIsSearchingSource(true); }}
-                    onFocus={() => setIsSearchingSource(true)}
-                    className="w-full py-2.5 text-sm text-slate-800 placeholder-slate-400 focus:outline-none"
-                  />
-                  {sourceQuery && <button onClick={clearSource} className="text-slate-400 hover:text-slate-600 p-1"><X size={14} /></button>}
+                <div className="flex items-center gap-1.5">
+                  <div className="flex-1 flex items-center bg-white border border-slate-200 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 pr-2">
+                    <div className="w-8 flex items-center justify-center text-emerald-600 shrink-0"><MapPin size={16} /></div>
+                    <input
+                      type="text" placeholder={view.level === 'campus' ? "Select or search building, gate, parking..." : "Select start room, lab, entrance..."}
+                      value={sourceQuery}
+                      onChange={(e) => { setSourceQuery(e.target.value); if (sourceObj) setSourceObj(null); setIsSearchingSource(true); }}
+                      onFocus={() => setIsSearchingSource(true)}
+                      className="w-full py-2 text-xs font-medium text-slate-800 placeholder-slate-400 focus:outline-none"
+                    />
+                    {sourceQuery && <button onClick={clearSource} className="text-slate-400 hover:text-slate-600 p-1"><X size={13} /></button>}
+                    <button onClick={() => setIsSearchingSource(!isSearchingSource)} className="text-slate-400 hover:text-slate-600 p-1"><ChevronDown size={13} /></button>
+                  </div>
+                  <button
+                    onClick={() => setPickMode(pickMode === 'start' ? null : 'start')}
+                    title="Pick Start Location directly on Map"
+                    className={`px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-1 transition-all border shrink-0 ${pickMode === 'start' ? 'bg-emerald-600 text-white border-emerald-600 ring-2 ring-emerald-300 animate-pulse' : 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'}`}
+                  >
+                    <Crosshair size={13} />
+                    <span className="hidden sm:inline">Pick</span>
+                  </button>
                 </div>
-                {isSearchingSource && sourceMatches.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-30 max-h-56 overflow-y-auto">
-                    {sourceMatches.map(match => {
-                      const bld = buildingMap.get(match.buildingId); const flr = floorMap.get(match.floorId);
-                      return (
-                        <div key={match.id} onMouseDown={() => selectSource(match)} className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-slate-100 last:border-0 flex items-center justify-between">
-                          <div>
-                            <p className="text-xs font-semibold text-slate-800">{typeof match.name === 'string' ? match.name : match.name?.en}</p>
-                            <p className="text-[10px] text-slate-400">{match.code} • {bld?.name.en || 'Building'} • L{flr?.level ?? 0}</p>
+
+                {isSearchingSource && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-2xl z-30 overflow-hidden flex flex-col max-h-64">
+                    {/* Scope Switcher: Current Map vs Whole Campus */}
+                    <div className="flex bg-slate-50 border-b border-slate-200 p-1 gap-1 text-[11px] font-semibold">
+                      <button
+                        onClick={() => setDropdownScope('current')}
+                        className={`flex-1 py-1 rounded-md transition-colors ${dropdownScope === 'current' ? 'bg-white text-blue-600 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-800'}`}
+                      >
+                        {view.level === 'campus' ? '🏫 Campus Map' : view.level === 'room' ? '🚪 Room Interior' : '📐 Current Floor'}
+                      </button>
+                      <button
+                        onClick={() => setDropdownScope('all')}
+                        className={`flex-1 py-1 rounded-md transition-colors ${dropdownScope === 'all' ? 'bg-white text-blue-600 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-800'}`}
+                      >
+                        🌐 Whole Campus
+                      </button>
+                    </div>
+
+                    <div className="overflow-y-auto divide-y divide-slate-100 flex-1">
+                      {sourceMatches.map(match => {
+                        const bld = buildingMap.get(match.buildingId); const flr = floorMap.get(match.floorId);
+                        return (
+                          <div key={match.id} onMouseDown={() => selectSource(match)} className="px-3 py-2 hover:bg-blue-50 cursor-pointer flex items-center justify-between transition-colors">
+                            <div>
+                              <p className="text-xs font-semibold text-slate-800">{typeof match.name === 'string' ? match.name : match.name?.en}</p>
+                              <p className="text-[10px] text-slate-400">{match.code ? `${match.code} • ` : ''}{bld?.name.en || 'Campus'}{flr ? ` • L${flr.level}` : ''}</p>
+                            </div>
+                            <span className="text-[9px] uppercase font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{match.category.replace(/_/g, ' ')}</span>
                           </div>
-                          <span className="text-[9px] uppercase font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{match.category.replace(/_/g, ' ')}</span>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                      {sourceMatches.length === 0 && (
+                        <div className="p-4 text-center text-xs text-slate-400">No matching destinations found.</div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
 
               {/* Destination */}
               <div className="relative">
-                <div className="flex items-center bg-white border border-slate-200 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 pr-2">
-                  <div className="w-9 flex items-center justify-center text-red-600 shrink-0"><Navigation size={16} /></div>
-                  <input
-                    type="text" placeholder="Search destination, lab, office..."
-                    value={destQuery}
-                    onChange={(e) => { setDestQuery(e.target.value); if (destObj) setDestObj(null); setIsSearchingDest(true); }}
-                    onFocus={() => setIsSearchingDest(true)}
-                    className="w-full py-2.5 text-sm text-slate-800 placeholder-slate-400 focus:outline-none"
-                  />
-                  {destQuery && <button onClick={clearDest} className="text-slate-400 hover:text-slate-600 p-1"><X size={14} /></button>}
+                <div className="flex items-center gap-1.5">
+                  <div className="flex-1 flex items-center bg-white border border-slate-200 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 pr-2">
+                    <div className="w-8 flex items-center justify-center text-red-600 shrink-0"><Navigation size={16} /></div>
+                    <input
+                      type="text" placeholder={view.level === 'campus' ? "Select or search destination building, lab..." : "Select destination room, lab, office..."}
+                      value={destQuery}
+                      onChange={(e) => { setDestQuery(e.target.value); if (destObj) setDestObj(null); setIsSearchingDest(true); }}
+                      onFocus={() => setIsSearchingDest(true)}
+                      className="w-full py-2 text-xs font-medium text-slate-800 placeholder-slate-400 focus:outline-none"
+                    />
+                    {destQuery && <button onClick={clearDest} className="text-slate-400 hover:text-slate-600 p-1"><X size={13} /></button>}
+                    <button onClick={() => setIsSearchingDest(!isSearchingDest)} className="text-slate-400 hover:text-slate-600 p-1"><ChevronDown size={13} /></button>
+                  </div>
+                  <button
+                    onClick={() => setPickMode(pickMode === 'dest' ? null : 'dest')}
+                    title="Pick Destination directly on Map"
+                    className={`px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-1 transition-all border shrink-0 ${pickMode === 'dest' ? 'bg-red-600 text-white border-red-600 ring-2 ring-red-300 animate-pulse' : 'bg-white text-red-700 border-red-300 hover:bg-red-50'}`}
+                  >
+                    <Crosshair size={13} />
+                    <span className="hidden sm:inline">Pick</span>
+                  </button>
                 </div>
-                {isSearchingDest && destMatches.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-30 max-h-56 overflow-y-auto">
-                    {destMatches.map(match => {
-                      const bld = buildingMap.get(match.buildingId); const flr = floorMap.get(match.floorId);
-                      return (
-                        <div key={match.id} onMouseDown={() => selectDest(match)} className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-slate-100 last:border-0 flex items-center justify-between">
-                          <div>
-                            <p className="text-xs font-semibold text-slate-800">{typeof match.name === 'string' ? match.name : match.name?.en}</p>
-                            <p className="text-[10px] text-slate-400">{match.code} • {bld?.name.en || 'Building'} • L{flr?.level ?? 0}</p>
+
+                {isSearchingDest && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-2xl z-30 overflow-hidden flex flex-col max-h-64">
+                    {/* Scope Switcher: Current Map vs Whole Campus */}
+                    <div className="flex bg-slate-50 border-b border-slate-200 p-1 gap-1 text-[11px] font-semibold">
+                      <button
+                        onClick={() => setDropdownScope('current')}
+                        className={`flex-1 py-1 rounded-md transition-colors ${dropdownScope === 'current' ? 'bg-white text-blue-600 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-800'}`}
+                      >
+                        {view.level === 'campus' ? '🏫 Campus Map' : view.level === 'room' ? '🚪 Room Interior' : '📐 Current Floor'}
+                      </button>
+                      <button
+                        onClick={() => setDropdownScope('all')}
+                        className={`flex-1 py-1 rounded-md transition-colors ${dropdownScope === 'all' ? 'bg-white text-blue-600 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-800'}`}
+                      >
+                        🌐 Whole Campus
+                      </button>
+                    </div>
+
+                    <div className="overflow-y-auto divide-y divide-slate-100 flex-1">
+                      {destMatches.map(match => {
+                        const bld = buildingMap.get(match.buildingId); const flr = floorMap.get(match.floorId);
+                        return (
+                          <div key={match.id} onMouseDown={() => selectDest(match)} className="px-3 py-2 hover:bg-blue-50 cursor-pointer flex items-center justify-between transition-colors">
+                            <div>
+                              <p className="text-xs font-semibold text-slate-800">{typeof match.name === 'string' ? match.name : match.name?.en}</p>
+                              <p className="text-[10px] text-slate-400">{match.code ? `${match.code} • ` : ''}{bld?.name.en || 'Campus'}{flr ? ` • L${flr.level}` : ''}</p>
+                            </div>
+                            <span className="text-[9px] uppercase font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{match.category.replace(/_/g, ' ')}</span>
                           </div>
-                          <span className="text-[9px] uppercase font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{match.category.replace(/_/g, ' ')}</span>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                      {destMatches.length === 0 && (
+                        <div className="p-4 text-center text-xs text-slate-400">No matching destinations found.</div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -624,6 +1149,22 @@ export const UserNavigationPage: React.FC = () => {
           <AIAssistantPage />
         ) : (
           <>
+            {/* Pick on Map Active Notification Banner */}
+            {pickMode && (
+              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-slate-900 text-white px-5 py-2.5 rounded-full shadow-2xl border border-slate-700 animate-bounce">
+                <Crosshair size={16} className={pickMode === 'start' ? 'text-emerald-400' : 'text-red-400'} />
+                <span className="text-xs font-medium">
+                  Click any building, room, entrance, or point on the map to set <strong>{pickMode === 'start' ? 'Start Location' : 'Destination'}</strong>
+                </span>
+                <button
+                  onClick={() => setPickMode(null)}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-2.5 py-0.5 rounded-full transition-colors ml-1"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
             {/* Top Bar: Breadcrumb + Controls */}
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 pointer-events-none">
               {/* Breadcrumb pill */}
@@ -723,6 +1264,12 @@ export const UserNavigationPage: React.FC = () => {
                 onSelectAsDestination={selectDest}
                 shapes={editorShapes}
                 onShapeClick={handleShapeClick}
+                isRoomView={view.level === 'room'}
+                isCampusView={view.level === 'campus'}
+                pickMode={pickMode}
+                onCanvasPick={handleCanvasPick}
+                pinPositions={{ source: visibleSourcePin, dest: visibleDestPin }}
+                onPinDrag={handlePinDrag}
               />
             </div>
           </>

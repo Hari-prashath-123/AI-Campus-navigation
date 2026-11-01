@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+﻿import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { MapObject, SpatialNode, EditorShape } from '../types';
 import { CampusConnection } from '../types/connection';
 import { RouteResult } from '../api/routing.service';
 import { Plus, Minus, RotateCcw, Navigation, MapPin, X, Check } from 'lucide-react';
 
-interface MapViewerProps {
+export interface MapViewerProps {
   objects: MapObject[];
   nodes: SpatialNode[];
   connections?: CampusConnection[];
@@ -19,6 +19,12 @@ interface MapViewerProps {
   onSelectAsDestination?: (obj: MapObject) => void;
   shapes?: EditorShape[];
   onShapeClick?: (shape: EditorShape) => void;
+  isRoomView?: boolean;
+  isCampusView?: boolean;
+  pickMode?: 'start' | 'dest' | null;
+  onCanvasPick?: (coords: { x: number; y: number }, shape?: EditorShape, obj?: MapObject) => void;
+  pinPositions?: { source?: { x: number; y: number }; dest?: { x: number; y: number } };
+  onPinDrag?: (which: 'source' | 'dest', newCanvasCoords: { x: number; y: number }) => void;
 }
 
 export const MapViewer: React.FC<MapViewerProps> = ({ 
@@ -36,6 +42,12 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   onSelectAsDestination,
   shapes = [],
   onShapeClick,
+  isRoomView = false,
+  isCampusView = false,
+  pickMode = null,
+  onCanvasPick,
+  pinPositions,
+  onPinDrag,
 }) => {
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const [, setTriggerRender] = useState(0);
@@ -48,6 +60,9 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [selectedObj, setSelectedObj] = useState<MapObject | null>(null);
+  const [draggingPin, setDraggingPin] = useState<'source' | 'dest' | null>(null);
+  const wasPinDraggingRef = useRef(false);
+  const [dragPinOffset, setDragPinOffset] = useState({ x: 0, y: 0 });
 
   // Resize canvas when container size changes
   useEffect(() => {
@@ -77,6 +92,15 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const handleZoom = (factor: number) => {
     setZoom(prev => Math.min(Math.max(0.5, prev * factor), 4));
   };
+
+  // Dynamic canvas bounds matching room boundary shape or default 1200x960
+  const canvasBounds = React.useMemo(() => {
+    const roomBoundary = shapes.find(s => s.attributes?.isRoomPerimeter || s.objectTypeId === 'room_boundary');
+    if (roomBoundary && roomBoundary.width && roomBoundary.height) {
+      return { width: roomBoundary.width, height: roomBoundary.height };
+    }
+    return { width: 1200, height: 960 };
+  }, [shapes]);
 
   // Convert map coordinates to screen coordinates with 1:1 uniform scale matching Map Editor
   const toScreenCoords = useCallback((coord: { x: number; y: number }) => {
@@ -150,8 +174,12 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     }
     ctx.restore();
 
-    const floorObjects = currentFloorId ? objects.filter(o => o.floorId === currentFloorId) : objects.filter(o => !o.floorId);
-    const floorNodes = currentFloorId ? nodes.filter(n => n.floorId === currentFloorId) : nodes.filter(n => !n.floorId);
+    // A campus view must never reuse the last floor's coordinate space.  This
+    // matters while React is changing views because floor coordinates are not
+    // meaningful on the campus plan.
+    const viewingCampus = isCampusView || !currentFloorId;
+    const floorObjects = viewingCampus ? objects.filter(o => !o.floorId) : objects.filter(o => o.floorId === currentFloorId);
+    const floorNodes = viewingCampus ? nodes.filter(n => !n.floorId) : nodes.filter(n => n.floorId === currentFloorId);
     const floorNodeMap = new Map(floorNodes.map(n => [n.id, n]));
 
     // 0. Draw Map Editor Shapes & 2D Preset Elements (Buildings, Roads, Lawns, Walls, Gates, Trees, Turf)
@@ -180,6 +208,52 @@ export const MapViewer: React.FC<MapViewerProps> = ({
               ctx.rotate((shape.rotation * Math.PI) / 180);
             }
             ctx.drawImage(img, 0, 0, sw, sh);
+            ctx.restore();
+          }
+
+          // Building Name Tag on Campus Map
+          const isBld = shape.objectTypeId === 'building' ||
+            shape.name.toLowerCase().includes('block') ||
+            shape.name.toLowerCase().includes('building') ||
+            shape.name.toLowerCase().includes('hall') ||
+            shape.name.toLowerCase().includes('lab') ||
+            shape.name.toLowerCase().includes('arena') ||
+            shape.name.toLowerCase().includes('center') ||
+            shape.name.toLowerCase().includes('auditorium') ||
+            shape.attributes?.isBuilding;
+
+          if (isBld && shape.name && (!currentFloorId || isCampusView)) {
+            ctx.save();
+            const tagText = shape.name;
+            ctx.font = `600 ${Math.max(11 * zoom, 9)}px Inter, sans-serif`;
+            const tagTw = ctx.measureText(tagText).width;
+            const tagW = tagTw + 22;
+            const tagH = 20;
+            const tagX = p1.x + sw / 2 - tagW / 2;
+            const tagY = p1.y - tagH - 4;
+
+            ctx.shadowColor = 'rgba(15, 23, 42, 0.12)';
+            ctx.shadowBlur = 6;
+            ctx.shadowOffsetY = 2;
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+            ctx.beginPath();
+            ctx.roundRect(tagX, tagY, tagW, tagH, 10);
+            ctx.fill();
+
+            ctx.strokeStyle = 'rgba(99, 102, 241, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.shadowColor = 'transparent';
+            ctx.fillStyle = '#4f46e5';
+            ctx.beginPath();
+            ctx.arc(tagX + 8, tagY + tagH / 2, 3, 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.fillStyle = '#1e293b';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(tagText, tagX + 15, tagY + tagH / 2);
             ctx.restore();
           }
           return;
@@ -299,85 +373,165 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       ctx.restore();
     }
 
-    // 1. Draw floor corridors / connections
-    const floorConns = connections.filter(
-      c => c.sourceFloorId === currentFloorId && c.targetFloorId === currentFloorId
-    );
+    // 1 & 2: Floor corridors & walkway nodes (only when no 2D custom shapes exist)
+    if (shapes.length === 0 && !isRoomView) {
+      const floorConns = connections.filter(
+        c => c.sourceFloorId === currentFloorId && c.targetFloorId === currentFloorId
+      );
 
-    ctx.save();
-    floorConns.forEach(conn => {
-      const srcNode = floorNodeMap.get(conn.sourceNodeId);
-      const tgtNode = floorNodeMap.get(conn.targetNodeId);
-      if (!srcNode || !tgtNode) return;
+      ctx.save();
+      floorConns.forEach(conn => {
+        const srcNode = floorNodeMap.get(conn.sourceNodeId);
+        const tgtNode = floorNodeMap.get(conn.targetNodeId);
+        if (!srcNode || !tgtNode) return;
 
-      const p1 = toScreenCoords(srcNode.coordinates);
-      const p2 = toScreenCoords(tgtNode.coordinates);
+        const p1 = toScreenCoords(srcNode.coordinates);
+        const p2 = toScreenCoords(tgtNode.coordinates);
 
-      ctx.strokeStyle = '#e2e8f0';
-      ctx.lineWidth = Math.max(6 * zoom, 3);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
-      ctx.stroke();
-
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = Math.max(2 * zoom, 1);
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
-      ctx.stroke();
-    });
-    ctx.restore();
-
-    // 2. Draw Walkway Nodes (subtle hallway junctions)
-    floorNodes.forEach(node => {
-      if (node.type === 'hallway' || node.type === 'outdoor_waypoint') {
-        const pt = toScreenCoords(node.coordinates);
-        ctx.fillStyle = '#94a3b8';
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = Math.max(6 * zoom, 3);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
         ctx.beginPath();
-        ctx.arc(pt.x, pt.y, Math.max(3 * zoom, 2), 0, 2 * Math.PI);
-        ctx.fill();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = Math.max(2 * zoom, 1);
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      });
+      ctx.restore();
+
+      // 2. Draw Walkway Nodes (subtle hallway junctions)
+      floorNodes.forEach(node => {
+        if (node.type === 'hallway' || node.type === 'outdoor_waypoint') {
+          const pt = toScreenCoords(node.coordinates);
+          ctx.fillStyle = '#94a3b8';
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, Math.max(3 * zoom, 2), 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      });
+    }
+
+    // Helper to get screen coordinates for any node (handles meters <= 100 or canvas pixels > 100)
+    const getNodeScreenPt = (coord: { x: number; y: number }) => {
+      if (shapes.length > 0) {
+        const isMeters = coord.x <= 100 && coord.y <= 100;
+        const px = isMeters ? coord.x * 12 : coord.x;
+        const py = isMeters ? coord.y * 12 : coord.y;
+        return shapeToScreen(px, py);
       }
-    });
+      return toScreenCoords(coord);
+    };
 
-    // 3. Draw Active Route on current floor
-    if (routeResult && routeResult.nodes && routeResult.nodes.length > 0) {
+    // 3. Draw Active Route on current floor / campus
+    if (routeResult && ((routeResult.nodes?.length || 0) > 0 || (routeResult.pathNodes?.length || 0) > 0)) {
+      // Build lookup map from prop nodes + resolved pathNodes
       const allNodeMap = new Map(nodes.map(n => [n.id, n]));
-      const fullPathNodes = routeResult.nodes
-        .map(id => allNodeMap.get(id))
-        .filter(Boolean) as SpatialNode[];
+      if (routeResult.pathNodes) {
+        routeResult.pathNodes.forEach(n => { if (!allNodeMap.has(n.id)) allNodeMap.set(n.id, n); });
+      }
 
-      // Group path nodes into continuous segments on this floor
-      const segments: SpatialNode[][] = [];
-      let curSegment: SpatialNode[] = [];
+      const fullPathNodes = (routeResult.pathNodes && routeResult.pathNodes.length > 0)
+        ? routeResult.pathNodes
+        : routeResult.nodes.map(id => allNodeMap.get(id)).filter(Boolean) as SpatialNode[];
 
-      for (let i = 0; i < fullPathNodes.length; i++) {
-        const node = fullPathNodes[i];
-        if (node.floorId === currentFloorId) {
-          curSegment.push(node);
-        } else {
-          if (curSegment.length > 0) {
-            segments.push(curSegment);
-            curSegment = [];
+      const curFloor = currentFloorId || '';
+      const isCampus = viewingCampus;
+
+      const segments: { x: number; y: number }[][] = [];
+
+      if (isCampus) {
+        // ── Campus View: collect continuous outdoor path coordinates ──
+        const campusPts: { x: number; y: number }[] = [];
+
+        // If route starts inside a building, prepend the building entrance anchor on campus
+        if (pinPositions?.source && sourceObj?.floorId) {
+          campusPts.push({ x: pinPositions.source.x, y: pinPositions.source.y });
+        } else if (pinPositions?.source && !campusPts.some(p => p.x === pinPositions.source!.x && p.y === pinPositions.source!.y)) {
+          campusPts.push({ x: pinPositions.source.x, y: pinPositions.source.y });
+        }
+
+        // Add all outdoor waypoints along the route
+        fullPathNodes.forEach(node => {
+          if (!node.floorId || node.floorId === '') {
+            if (node.coordinates && (node.coordinates.x > 0 || node.coordinates.y > 0)) {
+              // Avoid exact duplicate adjacent points
+              const last = campusPts[campusPts.length - 1];
+              if (!last || Math.hypot(last.x - node.coordinates.x, last.y - node.coordinates.y) > 2) {
+                campusPts.push(node.coordinates);
+              }
+            }
+          }
+        });
+
+        // If route ends inside a building, append the destination building entrance anchor on campus
+        if (pinPositions?.dest && destObj?.floorId) {
+          const last = campusPts[campusPts.length - 1];
+          if (!last || Math.hypot(last.x - pinPositions.dest.x, last.y - pinPositions.dest.y) > 2) {
+            campusPts.push({ x: pinPositions.dest.x, y: pinPositions.dest.y });
+          }
+        } else if (pinPositions?.dest) {
+          const last = campusPts[campusPts.length - 1];
+          if (!last || Math.hypot(last.x - pinPositions.dest.x, last.y - pinPositions.dest.y) > 2) {
+            campusPts.push({ x: pinPositions.dest.x, y: pinPositions.dest.y });
           }
         }
+
+        if (campusPts.length >= 2) {
+          segments.push(campusPts);
+        }
+      } else {
+        // ── Floor View: group path nodes on current floor ──
+        let curSegment: { x: number; y: number }[] = [];
+        for (let i = 0; i < fullPathNodes.length; i++) {
+          const node = fullPathNodes[i];
+          const nodeFloor = node.floorId || '';
+          if (nodeFloor === curFloor) {
+            curSegment.push(node.coordinates);
+          } else {
+            if (curSegment.length > 0) {
+              segments.push(curSegment);
+              curSegment = [];
+            }
+          }
+        }
+        if (curSegment.length > 0) segments.push(curSegment);
       }
-      if (curSegment.length > 0) segments.push(curSegment);
 
       // Render route segments with glowing effect
       segments.forEach(segment => {
         if (segment.length < 1) return;
 
+        // If single waypoint, draw prominent arrival dot
+        if (segment.length === 1) {
+          const pt = getNodeScreenPt(segment[0]);
+          ctx.save();
+          ctx.fillStyle = '#2563eb';
+          ctx.strokeStyle = 'rgba(59, 130, 246, 0.4)';
+          ctx.lineWidth = Math.max(8 * zoom, 5);
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, Math.max(6 * zoom, 4), 0, 2 * Math.PI);
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+          return;
+        }
+
         // Outer glow
         ctx.save();
-        ctx.strokeStyle = 'rgba(59, 130, 246, 0.25)';
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.35)';
         ctx.lineWidth = Math.max(14 * zoom, 8);
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.beginPath();
-        segment.forEach((n, idx) => {
-          const pt = toScreenCoords(n.coordinates);
+        segment.forEach((ptCoord, idx) => {
+          const pt = getNodeScreenPt(ptCoord);
           if (idx === 0) ctx.moveTo(pt.x, pt.y);
           else ctx.lineTo(pt.x, pt.y);
         });
@@ -391,8 +545,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.beginPath();
-        segment.forEach((n, idx) => {
-          const pt = toScreenCoords(n.coordinates);
+        segment.forEach((ptCoord, idx) => {
+          const pt = getNodeScreenPt(ptCoord);
           if (idx === 0) ctx.moveTo(pt.x, pt.y);
           else ctx.lineTo(pt.x, pt.y);
         });
@@ -406,8 +560,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         ctx.restore();
 
         // Draw route waypoint dots along path
-        segment.forEach(n => {
-          const pt = toScreenCoords(n.coordinates);
+        segment.forEach(ptCoord => {
+          const pt = getNodeScreenPt(ptCoord);
           ctx.fillStyle = '#ffffff';
           ctx.strokeStyle = '#2563eb';
           ctx.lineWidth = 2;
@@ -426,7 +580,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
           // If fromNode is on this floor
           if (fromNode && fromNode.floorId === currentFloorId) {
-            const pt = toScreenCoords(fromNode.coordinates);
+            const pt = shapes.length > 0 ? shapeToScreen(fromNode.coordinates.x, fromNode.coordinates.y) : toScreenCoords(fromNode.coordinates);
             ctx.save();
             ctx.fillStyle = tr.type === 'elevator' ? '#7c3aed' : '#d97706';
             ctx.shadowColor = 'rgba(0,0,0,0.2)';
@@ -461,7 +615,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
           // If toNode is on this floor (arrival from another floor)
           if (toNode && toNode.floorId === currentFloorId && fromNode?.floorId !== currentFloorId) {
-            const pt = toScreenCoords(toNode.coordinates);
+            const pt = shapes.length > 0 ? shapeToScreen(toNode.coordinates.x, toNode.coordinates.y) : toScreenCoords(toNode.coordinates);
             ctx.save();
             ctx.fillStyle = '#059669';
             ctx.beginPath();
@@ -485,14 +639,38 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       const isEnd = destObj?.id === obj.id;
       const isSelected = selectedObj?.id === obj.id;
 
-      // When visual 2D shapes are present, suppress generic circles for decorative elements (trees, grass, roads, walls)
-      const objNameStr = typeof obj.name === 'string' ? obj.name : (obj.name?.en || obj.code || '');
-      const isDecorative = /tree|turf|grass|road|wall|fence|gate|hedge/i.test(objNameStr);
-      if (shapes.length > 0 && isDecorative && !isStart && !isEnd && !isSelected) {
+      // When explicit pinPositions are active, don't draw duplicate A/B markers for start/end
+      if (isStart && pinPositions?.source) return;
+      if (isEnd && pinPositions?.dest) return;
+      // Safety: never draw dest marker when destObj is a floor-level object but we are on campus view
+      if (isEnd && destObj?.floorId && !currentFloorId) return;
+      // Safety: never draw dest marker on wrong floor
+      if (isEnd && destObj?.floorId && currentFloorId && destObj.floorId !== currentFloorId) return;
+      // Safety: never draw source marker on floor if source has no floorId (campus-level)
+      if (isStart && sourceObj?.floorId === '' && currentFloorId) return;
+
+      // When 2D shapes are present, navigation is visual: only draw pins for Start, Destination, or Selected item!
+      if (shapes.length > 0 && !isStart && !isEnd && !isSelected) {
         return;
       }
 
-      const pt = toScreenCoords(obj.coordinates);
+      let pt: { x: number; y: number };
+      if (obj.coordinates && (obj.coordinates.x !== 0 || obj.coordinates.y !== 0)) {
+        pt = shapeToScreen(obj.coordinates.x, obj.coordinates.y);
+      } else {
+        const matchedShape = shapes.find(s =>
+          s.objectId === obj.id ||
+          s.id === obj.id ||
+          (s.name && (typeof obj.name === 'string' ? obj.name : obj.name?.en || '').toLowerCase() === s.name.toLowerCase())
+        );
+        if (matchedShape) {
+          const sw = matchedShape.width || 60;
+          const sh = matchedShape.height || 40;
+          pt = shapeToScreen(matchedShape.x + sw / 2, matchedShape.y + sh / 2);
+        } else {
+          pt = toScreenCoords(obj.coordinates);
+        }
+      }
       const radius = Math.max((isStart || isEnd || isSelected ? 18 : 14) * zoom, 8);
 
       // Color coding per category
@@ -579,15 +757,136 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       ctx.restore();
     });
 
-  }, [dimensions, zoom, pan, objects, nodes, connections, routeResult, currentFloorId, sourceObj, destObj, selectedObj, toScreenCoords, shapes, shapeToScreen]);
 
-  // Click handler to select object or open popover
+    // 5. Draw explicit pin positions (A/B) from pinPositions prop
+    const drawExplicitPin = (pos: { x: number; y: number }, label: string, fillColor: string, strokeColor: string, title?: string) => {
+      const sc = shapeToScreen(pos.x, pos.y);
+      const radius = Math.max(18 * zoom, 12);
+      ctx.save();
+      // Halo
+      ctx.strokeStyle = fillColor + '55';
+      ctx.lineWidth = radius * 0.6;
+      ctx.beginPath(); ctx.arc(sc.x, sc.y, radius + 4, 0, 2 * Math.PI); ctx.stroke();
+      // Fill circle
+      ctx.fillStyle = fillColor;
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = Math.max(2.5 * zoom, 1.5);
+      ctx.shadowColor = 'rgba(0,0,0,0.18)';
+      ctx.shadowBlur = 8;
+      ctx.beginPath(); ctx.arc(sc.x, sc.y, radius, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+      // Label
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold ' + Math.max(11 * zoom, 8) + 'px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, sc.x, sc.y);
+
+      // Title badge below pin
+      if (title) {
+        ctx.font = `bold ${Math.max(11 * zoom, 9)}px Inter, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const labelY = sc.y + radius + 4;
+        const textWidth = ctx.measureText(title).width;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+        ctx.beginPath();
+        ctx.roundRect(sc.x - textWidth / 2 - 4, labelY - 1, textWidth + 8, 14 * zoom + 2, 4);
+        ctx.fill();
+        ctx.strokeStyle = fillColor === '#10b981' ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = fillColor === '#10b981' ? '#065f46' : '#991b1b';
+        ctx.fillText(title, sc.x, labelY);
+      }
+      ctx.restore();
+    };
+
+    const startTitle = sourceObj ? (typeof sourceObj.name === 'string' ? sourceObj.name : sourceObj.name?.en || sourceObj.code) : undefined;
+    const destTitle = destObj ? (typeof destObj.name === 'string' ? destObj.name : destObj.name?.en || destObj.code) : undefined;
+
+    if (pinPositions?.source) drawExplicitPin(pinPositions.source, 'A', '#10b981', '#047857', startTitle);
+    if (pinPositions?.dest) drawExplicitPin(pinPositions.dest, 'B', '#ef4444', '#b91c1c', destTitle);
+
+
+  }, [dimensions, zoom, pan, objects, nodes, connections, routeResult, currentFloorId, isCampusView, sourceObj, destObj, selectedObj, toScreenCoords, shapes, shapeToScreen, pinPositions]);
+
+  // Click handler to select object, pick on map, or drill-down
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (wasPinDraggingRef.current) return;
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
 
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
+
+    const fitScale = Math.min((dimensions.width - 40) / canvasBounds.width, (dimensions.height - 40) / canvasBounds.height);
+    const totalScale = fitScale * zoom;
+    const offsetX = (dimensions.width - canvasBounds.width * totalScale) / 2;
+    const offsetY = (dimensions.height - canvasBounds.height * totalScale) / 2;
+    const canvasX = (clickX - pan.x - offsetX) / totalScale;
+    const canvasY = (clickY - pan.y - offsetY) / totalScale;
+
+    // Pick on Map Mode
+    if (pickMode && onCanvasPick) {
+      let clickedShape: EditorShape | undefined;
+      for (let i = shapes.length - 1; i >= 0; i--) {
+        const s = shapes[i];
+        const sx = s.x ?? 0, sy = s.y ?? 0;
+        const sw = s.width ?? 60, sh = s.height ?? 40;
+        let rx = canvasX - sx, ry = canvasY - sy;
+        if (s.rotation) {
+          const rad = (-s.rotation * Math.PI) / 180;
+          const cos = Math.cos(rad), sin = Math.sin(rad);
+          const nrx = rx * cos - ry * sin;
+          const nry = rx * sin + ry * cos;
+          rx = nrx; ry = nry;
+        }
+        if (rx >= 0 && rx <= sw && ry >= 0 && ry <= sh && !s.attributes?.isRoomPerimeter) {
+          clickedShape = s;
+          break;
+        }
+      }
+
+      let clickedObj: MapObject | undefined;
+      for (const obj of objects) {
+        const pt = toScreenCoords(obj.coordinates);
+        if (Math.hypot(pt.x - clickX, pt.y - clickY) <= Math.max(24 * zoom, 16)) {
+          clickedObj = obj;
+          break;
+        }
+      }
+
+      // Also check if clicked near a polyline path or road
+      if (!clickedShape) {
+        for (let i = shapes.length - 1; i >= 0; i--) {
+          const s = shapes[i];
+          if (s.geometryType === 'polyline' && s.points && s.points.length >= 4) {
+            for (let p = 0; p < s.points.length - 2; p += 2) {
+              const x1 = s.points[p], y1 = s.points[p + 1];
+              const x2 = s.points[p + 2], y2 = s.points[p + 3];
+              const l2 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
+              let dist = 999;
+              if (l2 === 0) {
+                dist = Math.hypot(canvasX - x1, canvasY - y1);
+              } else {
+                let t = ((canvasX - x1) * (x2 - x1) + (canvasY - y1) * (y2 - y1)) / l2;
+                t = Math.max(0, Math.min(1, t));
+                dist = Math.hypot(canvasX - (x1 + t * (x2 - x1)), canvasY - (y1 + t * (y2 - y1)));
+              }
+              if (dist <= 30) {
+                clickedShape = s;
+                break;
+              }
+            }
+            if (clickedShape) break;
+          }
+        }
+      }
+
+      onCanvasPick({ x: Math.round(canvasX), y: Math.round(canvasY) }, clickedShape, clickedObj);
+      return;
+    }
 
     const floorObjects = objects.filter(o => o.floorId === currentFloorId);
 
@@ -605,19 +904,42 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     if (hit) {
       setSelectedObj(hit);
       if (onObjectClick) onObjectClick(hit);
+      // If clicking a building object or object on campus map, trigger onShapeClick drill-down
+      if (onShapeClick) {
+        const matchingShape = shapes.find(s => s.objectId === hit!.id || s.id === hit!.id);
+        if (matchingShape) {
+          onShapeClick(matchingShape);
+        } else if (hit.category === 'building' || hit.buildingId) {
+          onShapeClick({
+            id: hit.buildingId || hit.id,
+            name: typeof hit.name === 'string' ? hit.name : hit.name?.en || '',
+            objectId: hit.buildingId || hit.id,
+            attributes: { buildingId: hit.buildingId || hit.id }
+          } as any);
+        }
+      }
     } else {
       setSelectedObj(null);
       // Check if a shape was clicked (for drill-down navigation)
       if (onShapeClick && shapes.length > 0) {
-        const fitScale = Math.min((dimensions.width - 40) / 1200, (dimensions.height - 40) / 960);
+        const fitScale = Math.min((dimensions.width - 40) / canvasBounds.width, (dimensions.height - 40) / canvasBounds.height);
         const totalScale = fitScale * zoom;
-        const offsetX = (dimensions.width - 1200 * totalScale) / 2;
-        const offsetY = (dimensions.height - 960 * totalScale) / 2;
+        const offsetX = (dimensions.width - canvasBounds.width * totalScale) / 2;
+        const offsetY = (dimensions.height - canvasBounds.height * totalScale) / 2;
         const canvasX = (clickX - pan.x - offsetX) / totalScale;
         const canvasY = (clickY - pan.y - offsetY) / totalScale;
 
-        for (let i = shapes.length - 1; i >= 0; i--) {
-          const s = shapes[i];
+        // Prioritize building shapes over background lawns/walls
+        const sortedShapes = [...shapes].sort((a, b) => {
+          const aName = (a.name || '').toLowerCase();
+          const bName = (b.name || '').toLowerCase();
+          const aIsBld = a.objectTypeId === 'building' || aName.includes('block') || aName.includes('building') || aName.includes('hall') || aName.includes('lab') ? 1 : 0;
+          const bIsBld = b.objectTypeId === 'building' || bName.includes('block') || bName.includes('building') || bName.includes('hall') || bName.includes('lab') ? 1 : 0;
+          return bIsBld - aIsBld;
+        });
+
+        for (const s of sortedShapes) {
+          if (s.attributes?.isCompoundWall || s.objectTypeId === 'compound_wall') continue;
           const sx = s.x ?? 0, sy = s.y ?? 0;
           const sw = s.width ?? 60, sh = s.height ?? 40;
           let rx = canvasX - sx;
@@ -649,11 +971,65 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
   // Drag pan handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (rect && pinPositions && onPinDrag) {
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+      const checkPin = (pos: { x: number; y: number } | undefined, which: 'source' | 'dest') => {
+        if (!pos) return false;
+        const sc = shapeToScreen(pos.x, pos.y);
+        const dist = Math.hypot(sc.x - clickX, sc.y - clickY);
+        if (dist <= Math.max(28 * zoom, 24)) {
+          setDraggingPin(which);
+          setDragPinOffset({ x: clickX - sc.x, y: clickY - sc.y });
+          return true;
+        }
+        return false;
+      };
+      if (checkPin(pinPositions.source, 'source') || checkPin(pinPositions.dest, 'dest')) {
+        e.preventDefault();
+        return;
+      }
+    }
     setIsDragging(true);
     setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (draggingPin && onPinDrag) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const clickX = e.clientX - rect.left - dragPinOffset.x;
+        const clickY = e.clientY - rect.top - dragPinOffset.y;
+        const fitScale = Math.min((dimensions.width - 40) / 1200, (dimensions.height - 40) / 960);
+        const totalScale = fitScale * zoom;
+        const offsetX = (dimensions.width - 1200 * totalScale) / 2;
+        const offsetY = (dimensions.height - 960 * totalScale) / 2;
+        const canvasX = (clickX - pan.x - offsetX) / totalScale;
+        const canvasY = (clickY - pan.y - offsetY) / totalScale;
+        onPinDrag(draggingPin, { x: Math.round(canvasX), y: Math.round(canvasY) });
+      }
+      return;
+    }
+    // Check hover over pins to show grab cursor
+    if (!draggingPin && pinPositions) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const isNear = (pos?: { x: number; y: number }) => {
+          if (!pos) return false;
+          const sc = shapeToScreen(pos.x, pos.y);
+          return Math.hypot(sc.x - mx, sc.y - my) <= Math.max(28 * zoom, 24);
+        };
+        if (isNear(pinPositions.source) || isNear(pinPositions.dest)) {
+          if (canvasRef.current) canvasRef.current.style.cursor = 'grab';
+        } else if (canvasRef.current && canvasRef.current.style.cursor === 'grab') {
+          canvasRef.current.style.cursor = pickMode ? 'crosshair' : 'default';
+        }
+      }
+    }
+
     if (!isDragging) return;
     setPan({
       x: e.clientX - dragStart.x,
@@ -661,7 +1037,14 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     });
   };
 
-  const handleMouseUp = () => setIsDragging(false);
+  const handleMouseUp = () => {
+    if (draggingPin) {
+      wasPinDraggingRef.current = true;
+      setTimeout(() => { wasPinDraggingRef.current = false; }, 200);
+    }
+    setDraggingPin(null);
+    setIsDragging(false);
+  };
 
   // Touch handlers for mobile pan & pinch-zoom
   const touchStartRef = useRef<{ x: number; y: number; dist?: number }>({ x: 0, y: 0 });
@@ -717,7 +1100,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
-        className={`w-full h-full block ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        className={`w-full h-full block ${draggingPin ? 'cursor-move' : isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
       />
 
       {/* Floating Zoom / Pan Controls */}

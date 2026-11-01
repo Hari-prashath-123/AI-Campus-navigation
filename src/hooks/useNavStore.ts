@@ -17,7 +17,13 @@ export function useNavStore(options?: { campusId?: string; floorId?: string }) {
 
   const nodes: SpatialNode[] = (() => {
     if (options && 'floorId' in options) {
-      return options.floorId ? navStore.getNodesByFloor(options.floorId) : [];
+      // An empty floor ID means the outdoor campus canvas, not "no nodes".
+      // Keeping this distinction lets campus entrance / gate nodes remain visible
+      // after reopening the map editor and preserves them during graph rebuilds.
+      if (options.floorId) return navStore.getNodesByFloor(options.floorId);
+      return options.campusId
+        ? navStore.getNodesByCampus(options.campusId).filter(n => !n.floorId)
+        : navStore.getNodes().filter(n => !n.floorId);
     }
     if (options && 'campusId' in options) {
       return options.campusId ? navStore.getNodesByCampus(options.campusId) : [];
@@ -27,7 +33,10 @@ export function useNavStore(options?: { campusId?: string; floorId?: string }) {
 
   const connections: CampusConnection[] = (() => {
     if (options && 'floorId' in options) {
-      return options.floorId ? navStore.getConnectionsByFloor(options.floorId) : [];
+      if (options.floorId) return navStore.getConnectionsByFloor(options.floorId);
+      return options.campusId
+        ? navStore.getConnectionsByCampus(options.campusId).filter(c => !c.sourceFloorId && !c.targetFloorId)
+        : navStore.getConnections().filter(c => !c.sourceFloorId && !c.targetFloorId);
     }
     if (options && 'campusId' in options) {
       return options.campusId ? navStore.getConnectionsByCampus(options.campusId) : [];

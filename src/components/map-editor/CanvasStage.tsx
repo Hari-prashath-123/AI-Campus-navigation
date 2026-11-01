@@ -39,6 +39,8 @@ export interface CanvasStageProps {
   activeCampusId?: string;
   activeFloorId?: string;
   activeBuildingId?: string;
+  /** When set, editor is in room interior mode — drag bounds are unrestricted */
+  isRoomInteriorMode?: boolean;
   onNodeCreated?: (node: SpatialNode) => void;
   onNodeUpdated?: (id: string, patch: Partial<SpatialNode>) => void;
   onNodeSelected?: (node: SpatialNode | null) => void;
@@ -73,7 +75,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   shapes, setShapes, onShapeFinalized, selectedIds, setSelectedIds,
   tool, onToolChange, gridSize, isSnapping, onCoordinatesChange, activeType, calibration, onDraftMeasure, onShapeUpdated,
   nodes = [], connections = [], layers = { floorplanImage: true, nodes: true, edges: true, objects: true, grid: true, validationWarnings: true },
-  activeCampusId, activeFloorId, activeBuildingId,
+  activeCampusId, activeFloorId, activeBuildingId, 
   onNodeCreated, onNodeUpdated, onNodeSelected, onEdgeCreated, onEdgeSelected,
   selectedNodeId, selectedEdgeId, validationIssues = [],
   zoom = 100, onZoomChange, nodeTypeToCreate = 'hallway',
@@ -498,12 +500,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     onZoomChange?.(Math.round(newScale * 100));
   }, [containerSize, shapes, nodes, bgImage, overlayConfig, calibration, onZoomChange]);
 
-  // Trigger fit to view when requested
+  // Keep fitToView ref updated so effect doesn't re-trigger on every render / prop change
+  const fitToViewRef = useRef(fitToView);
+  useEffect(() => {
+    fitToViewRef.current = fitToView;
+  }, [fitToView]);
+
+  // Trigger fit to view ONLY when fitToViewTrigger explicitly increments
   useEffect(() => {
     if (fitToViewTrigger && fitToViewTrigger > 0) {
-      fitToView();
+      fitToViewRef.current();
     }
-  }, [fitToViewTrigger, fitToView]);
+  }, [fitToViewTrigger]);
 
   // Sync transformer to selected shape nodes with double-tick check
   useEffect(() => {
@@ -825,10 +833,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   };
 
   const handleShapeClick = (shapeId: string, e: KonvaEventObject<MouseEvent>) => {
-    e.cancelBubble = true;
-    if (onToolChange && tool !== 'select') {
-      onToolChange('select');
+    // If a drawing tool or non-select tool is active, DO NOT intercept or cancel drawing!
+    if (tool !== 'select') {
+      return;
     }
+    e.cancelBubble = true;
 
     if (e.evt.shiftKey) {
       if (selectedIds.includes(shapeId)) {
@@ -920,8 +929,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const handleDragEnd = (e: KonvaEventObject<DragEvent>) => {
     const id = e.target.id();
     const node = e.target;
-    const newX = Math.max(0, snap(node.x()));
-    const newY = Math.max(0, snap(node.y()));
+    const newX = snap(node.x());
+    const newY = snap(node.y());
     node.x(newX);
     node.y(newY);
 
@@ -1100,6 +1109,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     const H = calibration.canvasHeightPx || 1400;
     const pxPerM = calibration.canvasWidthPx / calibration.realWidthMeters;
 
+    // Crisp white canvas background
+    lines.push(<Rect key="canvas_bg" x={0} y={0} width={W} height={H} fill="#ffffff" />);
+
     for (let x = 0; x <= W; x += gridSize) {
       lines.push(<Line key={`v${x}`} points={[x, 0, x, H]} stroke="#e2e8f0" strokeWidth={0.5} />);
     }
@@ -1262,9 +1274,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                         strokeWidth={strokeW}
                         dash={dashPattern}
                         draggable={tool === 'select' && !isDraft && !shape.isLocked}
-                        dragBoundFunc={(pos) => ({ x: Math.max(0, pos.x), y: Math.max(0, pos.y) })}
+                        
+                        listening={tool === 'select' || (!shape.isLocked && !shape.attributes?.isRoomPerimeter)}
                         onMouseDown={(e) => {
-                          if (!isDraft) {
+                          if (tool === 'select' && !isDraft && !shape.isLocked) {
                             handleShapeClick(shape.id, e);
                           }
                         }}
@@ -1290,9 +1303,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                         strokeWidth={strokeW}
                         dash={dashPattern}
                         draggable={tool === 'select' && !isDraft && !shape.isLocked}
-                        dragBoundFunc={(pos) => ({ x: Math.max(0, pos.x), y: Math.max(0, pos.y) })}
+                        
+                        listening={tool === 'select' || (!shape.isLocked && !shape.attributes?.isRoomPerimeter)}
                         onMouseDown={(e) => {
-                          if (!isDraft) {
+                          if (tool === 'select' && !isDraft && !shape.isLocked) {
                             handleShapeClick(shape.id, e);
                           }
                         }}
@@ -2015,7 +2029,7 @@ const ImageShape: React.FC<ImageShapeProps> = ({
         height={h}
         rotation={rot}
         draggable={tool === 'select' && !isLocked}
-        dragBoundFunc={(pos) => ({ x: Math.max(0, pos.x), y: Math.max(0, pos.y) })}
+        
         listening={tool === 'select'}
         onMouseDown={(e) => {
           if (tool === 'select') onShapeClick(shape.id, e);

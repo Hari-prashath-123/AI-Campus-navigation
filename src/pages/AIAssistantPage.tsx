@@ -1,9 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { aiService } from '../api/ai.service';
 import { campusService } from '../api/campus.service';
 import { AIChatMessage, SupportedLanguage, LanguageConfig, Campus } from '../types';
 import { generateEntityId } from '../utils/validation';
-import { Bot, Send, Globe, MapPin, Loader2, ChevronRight, Navigation, Building2 } from 'lucide-react';
+import { Bot, Send, Globe, MapPin, Loader2, ChevronRight, Navigation, Building2, Play, Volume2, VolumeX, Mic, MicOff } from 'lucide-react';
+import { CampusGuideAvatar } from '../components/CampusGuideAvatar';
+import { RouteSimulationModal } from '../components/RouteSimulationModal';
 
 // ─── Language config ──────────────────────────────────────────────────────────
 
@@ -62,12 +64,22 @@ function renderMarkdown(text: string) {
 
 // ─── Route Summary Card ───────────────────────────────────────────────────────
 
-function RouteSummaryCard({ route }: { route: any }) {
+function RouteSummaryCard({ route, onOpenSimulation }: { route: any; onOpenSimulation?: () => void }) {
   if (!route?.totalDistanceMeters) return null;
   return (
     <div className="mt-3 bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4 space-y-3">
-      <div className="flex items-center gap-2 text-blue-700 font-bold text-sm">
-        <Navigation size={16} /> Route Summary
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2 text-blue-700 font-bold text-sm">
+          <Navigation size={16} /> Route Summary
+        </div>
+        {onOpenSimulation && (
+          <button
+            onClick={onOpenSimulation}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md transition-all active:scale-95"
+          >
+            <Play size={12} fill="currentColor" /> Watch Video Tutorial Simulation
+          </button>
+        )}
       </div>
       <div className="grid grid-cols-2 gap-3 text-sm">
         <div className="bg-white rounded-lg p-3 border border-blue-100 text-center">
@@ -132,6 +144,10 @@ function ToolCallBadge({ name }: { name: string }) {
 export const AIAssistantPage: React.FC = () => {
   const [campuses, setCampuses] = useState<Campus[]>([]);
   const [activeCampusId, setActiveCampusId] = useState<string>('campus-tech-inst');
+  const [simulationRoute, setSimulationRoute] = useState<any | null>(null);
+  const [isSimulationOpen, setIsSimulationOpen] = useState(false);
+  const [autoVoice, setAutoVoice] = useState(true);
+  const [currentlySpeakingId, setCurrentlySpeakingId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AIChatMessage[]>([
     {
       id: 'sys-1',
@@ -145,6 +161,56 @@ export const AIAssistantPage: React.FC = () => {
   const [selectedLang, setSelectedLang] = useState<SupportedLanguage>('en');
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
+  const startVoiceInput = () => {
+    if (typeof window === 'undefined') return;
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
+      return;
+    }
+
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = selectedLang === 'ta' ? 'ta-IN' : selectedLang === 'hi' ? 'hi-IN' : 'en-US';
+      recognition.continuous = false;
+      recognition.interimResults = false;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        if (transcript) {
+          setInput(transcript);
+          handleSend(transcript);
+        }
+        setIsListening(false);
+      };
+
+      recognition.onerror = () => {
+        setIsListening(false);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch {
+      setIsListening(false);
+    }
+  };
 
   useEffect(() => {
     campusService.getCampuses().then(res => {
@@ -158,6 +224,27 @@ export const AIAssistantPage: React.FC = () => {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Web Speech API Voice synthesis helper
+  const speakText = useCallback((text: string, msgId?: string, lang?: SupportedLanguage) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    try {
+      window.speechSynthesis.cancel();
+      if (currentlySpeakingId === msgId) {
+        setCurrentlySpeakingId(null);
+        return;
+      }
+      const clean = text.replace(/[*_#`~⚙]/g, '').trim();
+      const utterance = new SpeechSynthesisUtterance(clean);
+      utterance.lang = (lang || selectedLang) === 'ta' ? 'ta-IN' : (lang || selectedLang) === 'hi' ? 'hi-IN' : 'en-US';
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+      utterance.onend = () => setCurrentlySpeakingId(null);
+      utterance.onerror = () => setCurrentlySpeakingId(null);
+      setCurrentlySpeakingId(msgId || null);
+      window.speechSynthesis.speak(utterance);
+    } catch {}
+  }, [currentlySpeakingId, selectedLang]);
 
   const handleSend = async (text?: string) => {
     const query = (text || input).trim();
@@ -280,10 +367,44 @@ export const AIAssistantPage: React.FC = () => {
               </select>
             </div>
           )}
-          <div className={`${campuses.length > 1 ? '' : 'ml-auto'} flex items-center gap-2 text-xs text-slate-400 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-200`}>
+          {/* Auto-Voice Toggle */}
+          <button
+            onClick={() => {
+              setAutoVoice(!autoVoice);
+              if (autoVoice && typeof window !== 'undefined' && window.speechSynthesis) {
+                window.speechSynthesis.cancel();
+              }
+            }}
+            className={`${campuses.length > 1 ? '' : 'ml-auto'} flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+              autoVoice ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-slate-50 text-slate-500 border-slate-200 hover:text-slate-700'
+            }`}
+            title={autoVoice ? 'Voice Replies Enabled (Click to Mute)' : 'Voice Replies Muted (Click to Enable)'}
+          >
+            {autoVoice ? <Volume2 size={13} className="text-blue-600" /> : <VolumeX size={13} />}
+            <span>{autoVoice ? 'Voice ON' : 'Voice OFF'}</span>
+          </button>
+
+          <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-200">
             <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
             {FLAG[selectedLang]} {LANGUAGES.find(l => l.code === selectedLang)?.nativeName}
           </div>
+        </div>
+
+        {/* Animated Campus Guide Simulation Avatar */}
+        <div className="px-6 pt-4 pb-1">
+          <CampusGuideAvatar
+            isSpeaking={Boolean(currentlySpeakingId)}
+            isListening={isListening}
+            isThinking={loading}
+            currentText={messages.find(m => m.id === currentlySpeakingId)?.content}
+            onToggleVoice={() => {
+              setAutoVoice(!autoVoice);
+              if (autoVoice && typeof window !== 'undefined' && window.speechSynthesis) {
+                window.speechSynthesis.cancel();
+              }
+            }}
+            voiceEnabled={autoVoice}
+          />
         </div>
 
         {/* Messages */}
@@ -304,12 +425,27 @@ export const AIAssistantPage: React.FC = () => {
                   </div>
                 ) : (
                   <>
-                    <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed space-y-1 ${
-                      msg.sender === 'user'
-                        ? 'bg-blue-600 text-white rounded-tr-sm'
-                        : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm shadow-sm'
-                    }`}>
-                      {renderMarkdown(msg.content)}
+                    <div className="flex items-start gap-2">
+                      <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed space-y-1 ${
+                        msg.sender === 'user'
+                          ? 'bg-blue-600 text-white rounded-tr-sm'
+                          : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm shadow-sm'
+                      }`}>
+                        {renderMarkdown(msg.content)}
+                      </div>
+                      {msg.sender === 'assistant' && (
+                        <button
+                          onClick={() => speakText(msg.content, msg.id, msg.detectedLanguage || selectedLang)}
+                          className="p-1.5 mt-1 text-slate-400 hover:text-blue-600 hover:bg-slate-100 rounded-lg transition-colors"
+                          title="Listen in voice"
+                        >
+                          {currentlySpeakingId === msg.id ? (
+                            <VolumeX size={15} className="text-blue-600 animate-pulse" />
+                          ) : (
+                            <Volume2 size={15} />
+                          )}
+                        </button>
+                      )}
                     </div>
 
                     {/* Tool call badges */}
@@ -320,7 +456,15 @@ export const AIAssistantPage: React.FC = () => {
                     )}
 
                     {/* Route card */}
-                    {msg.routeResult && <RouteSummaryCard route={msg.routeResult} />}
+                    {msg.routeResult && (
+    <RouteSummaryCard
+      route={msg.routeResult}
+      onOpenSimulation={() => {
+        setSimulationRoute(msg.routeResult);
+        setIsSimulationOpen(true);
+      }}
+    />
+  )}
 
                     {/* POI cards */}
                     {msg.poiResults && msg.poiResults.length > 0 && (
@@ -376,6 +520,7 @@ export const AIAssistantPage: React.FC = () => {
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
                 placeholder={
+                  isListening ? 'Listening to your voice...' :
                   selectedLang === 'ta' ? 'கேள்வி கேளுங்கள்…' :
                   selectedLang === 'hi' ? 'प्रश्न पूछें…' :
                   'Ask a question…'
@@ -384,6 +529,19 @@ export const AIAssistantPage: React.FC = () => {
                 className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all disabled:opacity-60"
               />
             </div>
+            <button
+              type="button"
+              onClick={startVoiceInput}
+              disabled={loading}
+              title={isListening ? 'Listening... click to stop' : 'Click to speak with microphone'}
+              className={`w-11 h-11 rounded-xl flex items-center justify-center transition-all shadow-sm ${
+                isListening
+                  ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse ring-4 ring-red-200'
+                  : 'bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-600 border border-slate-200'
+              }`}
+            >
+              {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+            </button>
             <button
               onClick={() => handleSend()}
               disabled={!input.trim() || loading}
@@ -397,6 +555,17 @@ export const AIAssistantPage: React.FC = () => {
           </p>
         </div>
       </div>
+
+      {/* Video Tutorial Simulation Modal */}
+      {simulationRoute && (
+        <RouteSimulationModal
+          isOpen={isSimulationOpen}
+          onClose={() => setIsSimulationOpen(false)}
+          route={simulationRoute}
+          campusId={activeCampusId}
+          language={selectedLang}
+        />
+      )}
     </div>
   );
 };

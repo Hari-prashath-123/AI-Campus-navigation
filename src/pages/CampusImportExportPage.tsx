@@ -147,7 +147,7 @@ export const CampusImportExportPage: React.FC = () => {
               Downloads a complete, portable <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">.json</code> bundle containing:
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {['Campus info', 'Buildings & Floors', 'Objects & Geometry', 'Object Types', 'Nodes', 'Connections', 'Access Rules', 'Metadata'].map(label => (
+              {['Campus info', 'Buildings & Floors', 'Map layouts', 'Objects & Geometry', 'Object Types', 'Nodes', 'Connections', 'Access Rules', 'Metadata'].map(label => (
                 <div key={label} className="flex items-center gap-2 text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
                   <Database size={12} className="text-indigo-500 shrink-0" /> {label}
                 </div>

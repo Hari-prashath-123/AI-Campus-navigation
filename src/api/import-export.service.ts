@@ -23,7 +23,22 @@ import { v4 as uuidv4 } from 'uuid';
 
 export type { ImportCampusOptions, ImportCampusResult };
 
-const MAX_IMPORT_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
+// Map editor layouts can contain embedded blueprint artwork, so a portable
+// campus backup needs room for more than just its relational records.
+const MAX_IMPORT_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
+
+function replaceMappedIds(value: unknown, idMap: Map<string, string>): unknown {
+  if (typeof value === 'string') {
+    let result = value;
+    for (const [from, to] of idMap) result = result.split(from).join(to);
+    return result;
+  }
+  if (Array.isArray(value)) return value.map(item => replaceMappedIds(item, idMap));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceMappedIds(item, idMap)]));
+  }
+  return value;
+}
 
 /**
  * CampusImportExportService
@@ -87,6 +102,24 @@ export class CampusImportExportService {
     // Access Rules
     const accessRulesRes = await accessRuleService.getRulesByCampus(campusId);
     const accessRules = accessRulesRes.data || [];
+
+    // Map-editor canvases live in browser storage because they can contain
+    // large blueprint/image data. Include every campus, floor, and room
+    // canvas so exporting a campus actually reproduces its declared maps.
+    const mapLayouts: { storageKey: string; shapes: any[] }[] = [];
+    if (typeof localStorage !== 'undefined') {
+      const prefix = `editor-shapes-${campusId}`;
+      for (let index = 0; index < localStorage.length; index++) {
+        const storageKey = localStorage.key(index);
+        if (!storageKey || !storageKey.startsWith(prefix)) continue;
+        try {
+          const shapes = JSON.parse(localStorage.getItem(storageKey) || '[]');
+          if (Array.isArray(shapes)) mapLayouts.push({ storageKey, shapes });
+        } catch {
+          // A corrupt cache entry must not prevent export of the valid campus data.
+        }
+      }
+    }
 
     const meta: CampusBundleMetadata = {
       schemaVersion: CAMPUS_BUNDLE_SCHEMA_VERSION,
@@ -206,6 +239,7 @@ export class CampusImportExportService {
         metadata: { name: c.name, description: c.description },
       })),
       accessRules,
+      mapLayouts,
     };
 
     auditService.log({
@@ -844,6 +878,28 @@ export class CampusImportExportService {
         }
       }
 
+      // 8. Restore the actual map-editor canvases after their referenced
+      // buildings, floors, rooms, and navigation nodes have been recreated.
+      // IDs are re-keyed for isolated imports, so remap both the storage key
+      // and every embedded shape reference before writing the layout.
+      let mapLayoutsImported = 0;
+      if (typeof localStorage !== 'undefined' && Array.isArray(migrated.mapLayouts)) {
+        const layoutIdMap = new Map<string, string>([
+          [migrated.campus.id, targetCampusId],
+          ...Array.from(buildingIdMap.entries()),
+          ...Array.from(floorIdMap.entries()),
+          ...Array.from(objectIdMap.entries()),
+          ...Array.from(nodeIdMap.entries()),
+        ]);
+        for (const layout of migrated.mapLayouts) {
+          if (!layout || typeof layout.storageKey !== 'string' || !Array.isArray(layout.shapes)) continue;
+          const storageKey = replaceMappedIds(layout.storageKey, layoutIdMap) as string;
+          const shapes = replaceMappedIds(layout.shapes, layoutIdMap);
+          localStorage.setItem(storageKey, JSON.stringify(shapes));
+          mapLayoutsImported++;
+        }
+      }
+
       auditService.log({
         userId: user.id,
         userEmail: user.email,
@@ -861,6 +917,7 @@ export class CampusImportExportService {
           objectsCount: migrated.objects.length,
           nodesCount: migrated.nodes.length,
           connectionsCount: migrated.connections.length,
+          mapLayoutsCount: mapLayoutsImported,
         },
       });
 

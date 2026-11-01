@@ -194,6 +194,15 @@ export interface ImportCampusResult {
   };
 }
 
+/**
+ * A saved map-editor canvas.  The editor persists these separately from the
+ * campus records, so they need to travel with a portable campus export.
+ */
+export interface ExportedMapLayout {
+  storageKey: string;
+  shapes: any[];
+}
+
 /** Full portable campus bundle */
 export interface CampusBundle {
   _meta: CampusBundleMetadata;
@@ -205,6 +214,7 @@ export interface CampusBundle {
   nodes: ExportedNode[];
   connections: ExportedConnection[];
   accessRules?: any[];
+  mapLayouts?: ExportedMapLayout[];
 }
 
 // ─── Validation Result ────────────────────────────────────────────────────────

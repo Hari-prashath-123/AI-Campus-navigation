@@ -15,6 +15,7 @@ import { AIAssistantPage } from './pages/AIAssistantPage';
 import { CampusImportExportPage } from './pages/CampusImportExportPage';
 import { OrganizationList } from './pages/OrganizationList';
 import { AccessControlPage } from './pages/AccessControlPage';
+import { DatabaseSettingsPage } from './pages/DatabaseSettingsPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 function App() {
@@ -26,7 +27,7 @@ function App() {
         <Route index element={<PlaceholderPage title="Dashboard" />} />
         <Route path="dashboard" element={<PlaceholderPage title="Dashboard" />} />
         <Route path="assets" element={<PlaceholderPage title="Asset Management" />} />
-        <Route path="settings" element={<PlaceholderPage title="Settings" />} />
+        <Route path="settings" element={<DatabaseSettingsPage />} />
 
         {/* Organizations */}
         <Route path="organizations" element={<OrganizationList />} />

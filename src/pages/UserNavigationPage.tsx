@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { campusService } from '../api/campus.service';
 import { objectService } from '../api/object.service';
 import { routingService, RouteResult, RouteStep } from '../api/routing.service';
@@ -11,7 +12,7 @@ import {
   Navigation, User, Car, MapPin, Layers, Bot, ArrowUpDown,
   Search, X, Check, AlertCircle, CornerUpLeft, CornerUpRight,
   ArrowUp, Compass, ChevronRight, Building2,
-  Clock, Footprints, ArrowLeft, LogOut, Crosshair, ChevronDown,
+  Clock, Footprints, ArrowLeft, LogOut, Crosshair, ChevronDown, Database,
 } from 'lucide-react';
 import { AIAssistantPage } from './AIAssistantPage';
 
@@ -1251,6 +1252,16 @@ export const UserNavigationPage: React.FC = () => {
                   </React.Fragment>
                 ))}
               </div>
+
+              {/* DB Dump & Seed Link */}
+              <Link
+                to="/admin/settings"
+                className="bg-white/95 backdrop-blur-sm rounded-xl shadow-md border border-slate-200 px-3 py-1.5 flex items-center gap-1.5 text-xs font-semibold text-slate-700 hover:text-blue-600 hover:border-blue-300 transition-colors pointer-events-auto"
+                title="Export or Seed Database"
+              >
+                <Database size={13} className="text-blue-600" />
+                <span className="hidden sm:inline">DB Dump & Seed</span>
+              </Link>
             </div>
 
             {/* Top Right Controls */}
